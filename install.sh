@@ -1,6 +1,5 @@
 #!/bin/bash
 # PTERODACTYL PANEL INSTALLER FIXED (Debian/Ubuntu)
-# Supports Debian 10/11/12 and Ubuntu 18.04/20.04/22.04/24.04
 # ==================================================
 
 set -euo pipefail
@@ -18,7 +17,7 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 clear
-echo -e "${GREEN}PTERODACTYL PANEL INSTALLER beta${NC}\n"
+echo -e "${GREEN}PTERODACTYL PANEL INSTALLER FIXED${NC}\n"
 
 # ---------- Detect OS ----------
 if [ -f /etc/os-release ]; then
@@ -62,61 +61,43 @@ echo
 log "Starting with: FQDN=$FQDN | Admin=$ADMIN_USER"
 read -p "Press Enter to continue..."
 
-# ---------- Remove ondrej residues ----------
-log "Removing any ondrej residues..."
+# ---------- Remove old PHP PPAs ----------
+log "Removing old Ondrej residues..."
 rm -f /etc/apt/sources.list.d/ondrej-php*.list || true
 sed -i '/ondrej\/php/d' /etc/apt/sources.list 2>/dev/null || true
 apt-get update -y
-ok "Ondrej residues removed."
+ok "Old Ondrej PHP PPAs removed."
 
-# ---------- Debian bullseye archive ----------
-if [[ "$OS_ID" == "debian" && "$CODENAME" == "bullseye" ]]; then
-  log "Adding bullseye-backports..."
-  cat > /etc/apt/sources.list.d/bullseye-backports.list <<EOF
-deb http://archive.debian.org/debian bullseye-backports main contrib non-free
-EOF
-  echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99no-check-valid-until
-  apt-get update -y
-  ok "Bullseye-backports added."
-fi
-
-# ---------- Install base deps ----------
-log "Installing prerequisites..."
-apt-get install -y ca-certificates curl wget lsb-release gnupg2 unzip git tar build-essential openssl software-properties-common || true
-ok "Prerequisites installed."
-
-# ---------- Install PHP 8.1 ----------
-install_php_debian() {
-  log "Installing PHP 8.1 on Debian..."
+# ---------- Add Sury PHP repo on Debian ----------
+if [[ "$OS_ID" == "debian" ]]; then
+  log "Adding Sury PHP repository for Debian..."
+  apt-get install -y lsb-release ca-certificates apt-transport-https software-properties-common gnupg2 curl
   curl -fsSL https://packages.sury.org/php/apt.gpg | gpg --dearmor -o /usr/share/keyrings/sury-archive-keyring.gpg
   echo "deb [signed-by=/usr/share/keyrings/sury-archive-keyring.gpg] https://packages.sury.org/php/ $(lsb_release -sc) main" \
     > /etc/apt/sources.list.d/sury-php.list
   apt-get update -y
-  apt-get install -y php8.1 php8.1-fpm php8.1-cli php8.1-mbstring php8.1-xml \
-    php8.1-curl php8.1-zip php8.1-gd php8.1-bcmath php8.1-mysql || err "PHP install failed"
-  ok "PHP 8.1 installed (Debian)."
-}
+  ok "Sury PHP repository added."
+fi
 
-install_php_ubuntu() {
-  log "Installing PHP 8.1 on Ubuntu..."
+# ---------- Install dependencies ----------
+log "Installing base dependencies..."
+apt-get install -y ca-certificates curl wget lsb-release gnupg2 unzip git tar build-essential openssl software-properties-common mariadb-server mariadb-client nginx redis-server || true
+systemctl enable --now mariadb
+ok "Dependencies installed."
+
+# ---------- Install PHP 8.1 ----------
+if [[ "$OS_ID" == "debian" ]]; then
+  log "Installing PHP 8.1 (Debian)..."
+  apt-get install -y php8.1 php8.1-fpm php8.1-cli php8.1-mbstring php8.1-xml php8.1-curl php8.1-zip php8.1-gd php8.1-bcmath php8.1-mysql
+else
+  log "Installing PHP 8.1 (Ubuntu)..."
   add-apt-repository -y ppa:ondrej/php
   apt-get update -y
-  apt-get install -y php8.1 php8.1-fpm php8.1-cli php8.1-mbstring php8.1-xml \
-    php8.1-curl php8.1-zip php8.1-gd php8.1-bcmath php8.1-mysql || err "PHP install failed"
-  ok "PHP 8.1 installed (Ubuntu)."
-}
+  apt-get install -y php8.1 php8.1-fpm php8.1-cli php8.1-mbstring php8.1-xml php8.1-curl php8.1-zip php8.1-gd php8.1-bcmath php8.1-mysql
+fi
+ok "PHP 8.1 installed."
 
-case "$OS_ID" in
-  debian) install_php_debian ;;
-  ubuntu) install_php_ubuntu ;;
-esac
-
-# ---------- Nginx, MariaDB, Redis ----------
-log "Installing Nginx, MariaDB, Redis..."
-DEBIAN_FRONTEND=noninteractive apt-get install -y nginx mariadb-server mariadb-client redis-server || err "Failed"
-systemctl enable --now mariadb
-
-# ---------- Create DB & user ----------
+# ---------- Create database ----------
 log "Creating MySQL database and user..."
 mysql <<SQL || err "MySQL commands failed"
 DROP DATABASE IF EXISTS pterodactyl;
@@ -128,8 +109,8 @@ FLUSH PRIVILEGES;
 SQL
 ok "Database created. Password: $DB_PASS"
 
-# ---------- Panel download ----------
-log "Downloading Panel..."
+# ---------- Download panel ----------
+log "Downloading Pterodactyl Panel..."
 mkdir -p /var/www/pterodactyl
 cd /var/www/pterodactyl
 curl -sL -o panel.tar.gz https://github.com/pterodactyl/panel/releases/latest/download/panel.tar.gz
@@ -137,19 +118,18 @@ tar -xzf panel.tar.gz
 chmod -R 755 storage bootstrap/cache
 cp .env.example .env || true
 
-# ---------- Update .env ----------
-log "Updating .env with DB password, database, and FQDN..."
+# ---------- Configure .env ----------
+log "Updating .env..."
 sed -i "s|DB_DATABASE=.*|DB_DATABASE=pterodactyl|" .env
 sed -i "s|DB_PASSWORD=.*|DB_PASSWORD=$DB_PASS|" .env
 sed -i "s|APP_URL=.*|APP_URL=https://$FQDN|" .env
 sed -i "s|APP_TIMEZONE=.*|APP_TIMEZONE=$TIMEZONE|" .env
 grep -q '^MAIL_FROM_ADDRESS' .env || echo "MAIL_FROM_ADDRESS=noreply@$FQDN" >> .env
 grep -q '^MAIL_FROM_NAME' .env || echo "MAIL_FROM_NAME=\"Pterodactyl Panel\"" >> .env
-
 chown -R www-data:www-data /var/www/pterodactyl
 
-# ---------- SSL cert ----------
-log "Creating self-signed SSL cert..."
+# ---------- SSL ----------
+log "Creating SSL certificate..."
 mkdir -p /etc/certs/certs
 cd /etc/certs/certs
 openssl req \
@@ -161,10 +141,10 @@ openssl req \
   -subj "/C=NA/ST=NA/L=NA/O=NA/CN=Generic SSL Certificate" \
   -keyout privkey.pem \
   -out fullchain.pem
-ok "SSL cert created in /etc/certs/certs"
+ok "SSL certificate created."
 
-# ---------- Nginx configuration ----------
-log "Configuring Nginx..."
+# ---------- Nginx config ----------
+log "Setting up Nginx..."
 rm -f /etc/nginx/sites-enabled/default
 NGINX_CONF="/etc/nginx/sites-available/pterodactyl.conf"
 cat > "$NGINX_CONF" <<EOF
@@ -225,7 +205,7 @@ EOF
 ln -sf "$NGINX_CONF" /etc/nginx/sites-enabled/pterodactyl.conf
 nginx -t && systemctl restart nginx || warn "Nginx reload failed."
 
-# ---------- Composer & artisan ----------
+# ---------- Composer & Laravel ----------
 log "Installing PHP dependencies..."
 curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
 cd /var/www/pterodactyl
@@ -235,8 +215,9 @@ php artisan config:clear
 php artisan cache:clear
 php artisan migrate --seed --force
 
+# ---------- Create admin user ----------
 log "Creating admin user..."
-php artisan p:user:make --email "$ADMIN_EMAIL" --username "$ADMIN_USER" --admin 1 --password "$ADMIN_PASS" --no-interaction
+php artisan p:user:make --email "$ADMIN_EMAIL" --username "$ADMIN_USER" --name_first "Admin" --name_last "User" --admin 1 --password "$ADMIN_PASS" --no-interaction
 
 clear
 ok "PTERODACTYL PANEL INSTALL COMPLETE"
