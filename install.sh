@@ -1,7 +1,7 @@
 #!/bin/bash
 # ==================================================
 #  PTERODACTYL PANEL‑ONLY (HTTP on 8080 + Self‑Signed SSL)
-#  Debian 11 (Bullseye) – PHP 8.1 from backports
+#  Debian 11 (Bullseye) – FIXED backports
 #  No Wings | No Certbot
 # ==================================================
 
@@ -46,21 +46,25 @@ log "Creating /var/www/pterodactyl..."
 mkdir -p /var/www/pterodactyl
 cd /var/www/pterodactyl
 
-# === Enable backports (PHP 8.1) ===
-log "Enabling Debian backports for PHP 8.1..."
-cat > /etc/apt/sources.list.d/backports.list <<EOF
-deb http://deb.debian.org/debian bullseye-backports main
+# === Enable backports (FIXED) ===
+log "Enabling Debian 11 backports (bullseye-backports)..."
+cat > /etc/apt/sources.list.d/bullseye-backports.list <<EOF
+deb http://deb.debian.org/debian bullseye-backports main contrib non-free
 EOF
+
+# === Update & install PHP 8.1 from backports ===
+log "Updating package list..."
 apt update
 
-# === System Update + Dependencies ===
-log "Updating system & installing packages..."
-apt -y upgrade
-apt -y install \
-    curl wget gnupg2 ca-certificates lsb-release \
-    nginx mariadb-server mariadb-client redis-server unzip git tar \
-    php8.1 php8.1-{cli,fpm,curl,mbstring,xml,bcmath,zip,gd,mysql} \
-    -t bullseye-backports
+log "Installing PHP 8.1 from backports..."
+apt install -y -t bullseye-backports \
+    php8.1 php8.1-{cli,fpm,curl,mbstring,xml,bcmath,zip,gd,mysql}
+
+# === Install other deps ===
+log "Installing Nginx, MariaDB, Redis, Composer..."
+apt install -y \
+    curl wget gnupg2 ca-certificates \
+    nginx mariadb-server mariadb-client redis-server unzip git tar
 
 # === MariaDB ===
 log "Setting up database..."
@@ -72,7 +76,7 @@ DROP DATABASE IF EXISTS test;
 CREATE DATABASE pterodactyl;
 CREATE USER IF NOT EXISTS 'pterodactyl'@'127.0.0.1' IDENTIFIED BY '$DB_PASS';
 GRANT ALL ON pterodactyl.* TO 'pterodactyl'@'127.0.0.1';
-FLUSH Privileges;
+FLUSH PRIVILEGES;
 SQL
 
 # === Composer ===
@@ -116,16 +120,16 @@ php artisan p:user:make \
     --password "$ADMIN_PASS" \
     --no-interaction
 
-# === Self‑Signed SSL (for Nginx) ===
+# === Self‑Signed SSL ===
 log "Generating self‑signed certificate..."
 mkdir -p /etc/ssl/pterodactyl
 openssl req \
   -new -newkey rsa:4096 -days 3650 -nodes -x509 \
-  -subj "/C=NA/ST=NA/L=NA/O=NA/CN=$FQDN" \
+  -subj "/C=IN/ST=NA/L=NA/O=GameHost/CN=$FQDN" \
   -keyout /etc/ssl/pterodactyl/privkey.pem \
   -out /etc/ssl/pterodactyl/fullchain.pem
 
-# === Nginx (HTTP on 8080 + HTTPS on 8443 optional) ===
+# === Nginx (HTTP on 8080) ===
 log "Configuring Nginx (HTTP on 8080)..."
 cat > /etc/nginx/sites-available/pterodactyl <<NGINX
 server {
@@ -151,7 +155,7 @@ ln -sf /etc/nginx/sites-available/pterodactyl /etc/nginx/sites-enabled/
 rm -f /etc/nginx/sites-enabled/default
 nginx -t && systemctl reload nginx
 
-# === Firewall (only 8080) ===
+# === Firewall ===
 log "Opening port 8080..."
 ufw allow $PANEL_PORT || true
 ufw reload || true
@@ -168,11 +172,12 @@ echo "Username: $ADMIN_USER"
 echo "Email: $ADMIN_EMAIL"
 echo "Password: $ADMIN_PASS"
 echo
-echo "Self‑signed certs (if you want HTTPS later):"
+echo "Self‑signed certs ready (for HTTPS on 8443 later):"
 echo "   /etc/ssl/pterodactyl/fullchain.pem"
 echo "   /etc/ssl/pterodactyl/privkey.pem"
 echo
-echo "Add HTTPS on 8443 later with:"
+echo "Add HTTPS later:"
 echo "   nano /etc/nginx/sites-available/pterodactyl"
-echo "   (add listen 8443 ssl; + ssl_certificate lines)"
+echo "   Add: listen 8443 ssl; + ssl_certificate lines"
+echo "   ufw allow 8443 && nginx -t && systemctl reload nginx"
 echo "=========================================="
