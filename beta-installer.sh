@@ -1,213 +1,181 @@
 #!/bin/bash
-# Pterodactyl Panel Installer - Final Fixed Version (PHP 8.2)
-set -euo pipefail
-IFS=$'\n\t'
-
-RED='\033[1;31m'; GREEN='\033[1;32m'; YELLOW='\033[1;33m'; BLUE='\033[1;34m'; NC='\033[0m'
-log(){ echo -e "${BLUE}[INFO]${NC} $1"; }
-ok(){ echo -e "${GREEN}[OK]${NC} $1"; }
-warn(){ echo -e "${YELLOW}[WARN]${NC} $1"; }
-err(){ echo -e "${RED}[ERROR]${NC} $1" >&2; exit 1; }
-
-if [ "$EUID" -ne 0 ]; then
-  err "Run this script as root"
-fi
 
 clear
-echo -e "${GREEN}=== Pterodactyl Panel Installer (PHP 8.2) ===${NC}"
+echo "============================================"
+echo "      Pterodactyl Full Auto-Installer       "
+echo "============================================"
+sleep 1
 
-### 1️⃣ Domain
-read -p "➡ Enter your panel domain (example: panel.example.com): " FQDN
-[[ -z "$FQDN" ]] && err "Domain required"
+# -------------------------
+# 1. Ask for basic inputs
+# -------------------------
 
-### 2️⃣ Email
-read -p "➡ Admin Email [admin@$FQDN]: " ADMIN_EMAIL
-ADMIN_EMAIL=${ADMIN_EMAIL:-"admin@$FQDN"}
+read -p "1️⃣ Enter your Panel Domain: " PANEL_DOMAIN
+read -p "2️⃣ Admin Email: " ADMIN_EMAIL
+read -p "3️⃣ Admin Username: " ADMIN_USER
+read -p "4️⃣ Admin First Name: " ADMIN_FIRST
+read -p "5️⃣ Admin Last Name: " ADMIN_LAST
 
-### 3️⃣ Username
-read -p "➡ Admin Username [admin]: " ADMIN_USER
-ADMIN_USER=${ADMIN_USER:-admin}
+echo ""
+read -p "6️⃣ Auto-generate DB password? (yes/no): " AUTODB
+DB_PASS=$(openssl rand -hex 16)
 
-### 4️⃣ First Name
-read -p "➡ First Name [Admin]: " ADMIN_FIRST
-ADMIN_FIRST=${ADMIN_FIRST:-Admin}
-
-### 5️⃣ Last Name
-read -p "➡ Last Name [User]: " ADMIN_LAST
-ADMIN_LAST=${ADMIN_LAST:-User}
-
-### 6️⃣ Auto-generate admin password?
-read -p "➡ Auto-generate admin password? (yes/no): " AUTOPASS
-if [[ "$AUTOPASS" == "yes" ]]; then
-    ADMIN_PASS=$(openssl rand -base64 18)
-    warn "Generated admin password: $ADMIN_PASS"
-else
-    read -s -p "➡ Enter Admin Password: " ADMIN_PASS
-    echo
-fi
-
-# DB variables
-DB_NAME="pterodactyl"
-DB_USER="pterodactyl"
-DB_PASS="$(openssl rand -base64 32)"
-TIMEZONE="Asia/Kolkata"
-
-log "Installing required packages..."
+# -------------------------
+# 2. Update system
+# -------------------------
 apt update -y
-apt install -y software-properties-common curl wget git unzip tar lsb-release gnupg2 ca-certificates
+apt upgrade -y
 
-### PHP 8.2 repo (Sury)
-log "Adding PHP 8.2 repo..."
-CODENAME=$(lsb_release -sc)
-curl -fsSL https://packages.sury.org/php/apt.gpg | gpg --dearmor -o /usr/share/keyrings/sury-archive-keyring.gpg
-echo "deb [signed-by=/usr/share/keyrings/sury-archive-keyring.gpg] https://packages.sury.org/php/ $CODENAME main" > /etc/apt/sources.list.d/sury-php.list
+# -------------------------
+# 3. Install PHP 8.2
+# -------------------------
+
+apt install -y ca-certificates apt-transport-https software-properties-common curl zip unzip git
+
+LC_ALL=C.UTF-8 add-apt-repository ppa:ondrej/php -y
 apt update -y
 
-log "Installing PHP 8.2..."
-apt install -y php8.2 php8.2-fpm php8.2-cli php8.2-mysql php8.2-mbstring php8.2-xml php8.2-curl php8.2-zip php8.2-gd php8.2-bcmath
+apt install -y \
+php8.2 php8.2-cli php8.2-common php8.2-gmp php8.2-curl php8.2-mysql \
+php8.2-mbstring php8.2-xml php8.2-bcmath php8.2-json php8.2-fpm \
+php8.2-zip php8.2-intl php8.2-readline
 
-log "Installing Nginx, MariaDB, Redis..."
-apt install -y nginx mariadb-server mariadb-client redis-server
+systemctl enable php8.2-fpm
+systemctl start php8.2-fpm
 
-systemctl enable --now mariadb nginx php8.2-fpm redis-server
+# -------------------------
+# 4. Install MariaDB
+# -------------------------
 
-### DATABASE
-log "Creating database..."
-mysql -u root <<SQL
-DROP DATABASE IF EXISTS \`${DB_NAME}\`;
-CREATE DATABASE \`${DB_NAME}\`;
-DROP USER IF EXISTS '${DB_USER}'@'127.0.0.1';
-CREATE USER '${DB_USER}'@'127.0.0.1' IDENTIFIED BY '${DB_PASS}';
-GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'127.0.0.1';
+apt install -y mariadb-server
+
+systemctl enable mariadb
+systemctl start mariadb
+
+mysql -uroot <<MYSQL_SCRIPT
+CREATE DATABASE panel;
+CREATE USER 'panel'@'127.0.0.1' IDENTIFIED BY '$DB_PASS';
+GRANT ALL PRIVILEGES ON panel.* TO 'panel'@'127.0.0.1';
 FLUSH PRIVILEGES;
-SQL
+MYSQL_SCRIPT
 
-### DOWNLOAD PANEL
-log "Downloading Pterodactyl..."
+echo "Database created with password: $DB_PASS"
+
+# -------------------------
+# 5. Install Composer
+# -------------------------
+
+export COMPOSER_ALLOW_SUPERUSER=1
+curl -sS https://getcomposer.org/installer | php
+mv composer.phar /usr/local/bin/composer
+
+# -------------------------
+# 6. Install Pterodactyl
+# -------------------------
+
 mkdir -p /var/www/pterodactyl
 cd /var/www/pterodactyl
 
 curl -Lo panel.tar.gz https://github.com/pterodactyl/panel/releases/latest/download/panel.tar.gz
 tar -xzvf panel.tar.gz
-rm panel.tar.gz
-chmod -R 755 storage bootstrap/cache
+chmod -R 755 storage/* bootstrap/cache/
+
+composer install --no-interaction --ansi --no-dev
+
 cp .env.example .env
 
-### UPDATE .env
-log "Updating .env..."
-
-sed -i "s|APP_URL=.*|APP_URL=https://$FQDN|" .env
-sed -i "s|DB_DATABASE=.*|DB_DATABASE=$DB_NAME|" .env
-sed -i "s|DB_USERNAME=.*|DB_USERNAME=$DB_USER|" .env
+# Modify .env automatically
+sed -i "s/APP_ENVIRONMENT_ONLY=true/APP_ENVIRONMENT_ONLY=false/" .env
+sed -i "s|APP_URL=.*|APP_URL=https://$PANEL_DOMAIN|" .env
+sed -i "s|DB_DATABASE=.*|DB_DATABASE=panel|" .env
+sed -i "s|DB_USERNAME=.*|DB_USERNAME=panel|" .env
 sed -i "s|DB_PASSWORD=.*|DB_PASSWORD=$DB_PASS|" .env
-sed -i "s|APP_TIMEZONE=.*|APP_TIMEZONE=$TIMEZONE|" .env
-
-# Important: Fix setup redirect
-sed -i "s|APP_ENVIRONMENT_ONLY=true|APP_ENVIRONMENT_ONLY=false|" .env
-
-### Composer install
-log "Installing Composer..."
-curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
-composer install --no-dev --optimize-autoloader
 
 php artisan key:generate --force
 php artisan migrate --seed --force
 
-### ADMIN USER CREATION
-log "Creating admin user..."
+# -------------------------
+# 7. Create admin user
+# -------------------------
 
 php artisan p:user:make \
-    --email="$ADMIN_EMAIL" \
-    --username="$ADMIN_USER" \
-    --name-first="$ADMIN_FIRST" \
-    --name-last="$ADMIN_LAST" \
-    --password="$ADMIN_PASS" \
-    --admin=1 \
-    --no-interaction
+--email="$ADMIN_EMAIL" \
+--username="$ADMIN_USER" \
+--name-first="$ADMIN_FIRST" \
+--name-last="$ADMIN_LAST" \
+--password="$(openssl rand -hex 12)" \
+--admin=1 --no-interaction
 
-### DETECT PHP-FPM SOCKET
-PHP_SOCK=$(find /run/php -name "php8.2-fpm.sock" | head -n 1)
-FASTCGI="unix:$PHP_SOCK"
+# -------------------------
+# 8. Setup SSL with certbot
+# -------------------------
 
-### SSL
-log "Generating self-signed SSL..."
-mkdir -p /etc/certs/certs
-openssl req -new -newkey rsa:4096 -days 3650 -nodes -x509 \
-  -subj "/CN=$FQDN" \
-  -keyout /etc/certs/certs/privkey.pem \
-  -out /etc/certs/certs/fullchain.pem
+apt install -y certbot python3-certbot-nginx
 
-### NGINX CONFIG
-log "Writing nginx config..."
+certbot --nginx -d $PANEL_DOMAIN --non-interactive --agree-tos -m $ADMIN_EMAIL
 
-cat >/etc/nginx/sites-available/pterodactyl.conf <<EOF
+# -------------------------
+# 9. NGINX config
+# -------------------------
+
+cat > /etc/nginx/sites-available/pterodactyl.conf <<EOF
 server {
     listen 80;
-    server_name $FQDN;
-    return 301 https://\$server_name\$request_uri;
+    server_name $PANEL_DOMAIN;
+    return 301 https://\$host\$request_uri;
 }
 
 server {
-    listen 443 ssl http2;
-    server_name $FQDN;
+    listen 443 ssl;
+    server_name $PANEL_DOMAIN;
 
     root /var/www/pterodactyl/public;
     index index.php;
 
-    ssl_certificate /etc/certs/certs/fullchain.pem;
-    ssl_certificate_key /etc/certs/certs/privkey.pem;
+    ssl_certificate /etc/letsencrypt/live/$PANEL_DOMAIN/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/$PANEL_DOMAIN/privkey.pem;
 
     location / {
         try_files \$uri \$uri/ /index.php?\$query_string;
     }
 
-    location ~ \.php\$ {
-        fastcgi_pass $FASTCGI;
+    location ~ \.php$ {
         include fastcgi_params;
+        fastcgi_pass unix:/run/php/php8.2-fpm.sock;
         fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+        fastcgi_intercept_errors off;
+    }
+
+    location ~ /\.(?!well-known).* {
+        deny all;
     }
 }
 EOF
 
-rm -f /etc/nginx/sites-enabled/default
-ln -sf /etc/nginx/sites-available/pterodactyl.conf /etc/nginx/sites-enabled/
+ln -sf /etc/nginx/sites-available/pterodactyl.conf /etc/nginx/sites-enabled/pterodactyl.conf
+systemctl restart nginx
 
-nginx -t && systemctl restart nginx
+# -------------------------
+# 10. Ask Cloudflare
+# -------------------------
 
-clear
-echo -e "${GREEN}=== INSTALL COMPLETE ===${NC}"
-echo "Panel URL: https://$FQDN"
-echo "Admin Email: $ADMIN_EMAIL"
-echo "Admin Username: $ADMIN_USER"
-echo "Admin Password: $ADMIN_PASS"
-echo "DB User: $DB_USER"
-echo "DB Pass: $DB_PASS"
-echo "============================================="
-echo ""
-echo "============================================"
-echo " Cloudflare Domain Check"
-echo "============================================"
-read -p "Are you using a Cloudflare-protected domain? (yes/no): " cf_answer
+read -p "🌐 Are you using Cloudflare? (yes/no): " CF
 
-if [[ "$cf_answer" == "yes" || "$cf_answer" == "y" ]]; then
+if [[ "$CF" == "yes" ]]; then
     echo ""
-    echo "IMPORTANT: Update your panel domain Configuration"
+    echo "➡ Set your Node inside Wings to:"
+    echo "Service Type: URL"
+    echo "TLS: NO TLS VERIFY"
+    echo "URL: https://localhost:443"
     echo ""
-    echo "Change this setting:"
-    echo ""
-    echo " Service Type (Required)"
-    echo " URL (Required)  ->  HTTPS://"
-    echo ""
-    echo " Example values:"
-    echo "   https://localhost:443"
-    echo "   https://localhost:8001"
-    echo ""
-    echo " Additional application settings → TLS →"
-    echo "    No TLS Verify  →  ON"
-    echo ""
-    echo "This is required because Cloudflare uses TLS proxying and will block requests without this fix."
-    echo ""
-else
-    echo "Skipping Cloudflare TLS instructions..."
 fi
 
+# -------------------------
+# DONE
+# -------------------------
+
+echo "============================================"
+echo " Pterodactyl Panel Installed Successfully! "
+echo " URL: https://$PANEL_DOMAIN"
+echo " Database Password: $DB_PASS"
+echo "============================================"
