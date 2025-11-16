@@ -1,6 +1,6 @@
 #!/bin/bash
-# PTERODACTYL PANEL INSTALLER (Debian/Ubuntu fixed)
-# Supports: Debian 10/11/12 and Ubuntu 20.04/22.04
+# PTERODACTYL PANEL INSTALLER FIXED (Debian 11 only)
+# ==================================================
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -17,23 +17,21 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 clear
-echo -e "${GREEN}PTERODACTYL PANEL INSTALLER (Debian/Ubuntu fixed)${NC}\n"
+echo -e "${GREEN}PTERODACTYL PANEL INSTALLER FIXED (Debian 11)${NC}\n"
 
-# Detect OS
+# ---------- Detect OS ----------
 if [ -f /etc/os-release ]; then
   . /etc/os-release
   OS_ID="$ID"
-  CODENAME="$(lsb_release -sc 2>/dev/null || true)"
+  OS_NAME="$NAME"
+  OS_VER="$VERSION_ID"
 else
   err "Cannot detect OS. /etc/os-release missing."
 fi
 
-case "$OS_ID" in
-  debian|ubuntu) ;;
-  *) err "Unsupported OS: $OS_ID";;
-esac
+[[ "$OS_ID" != "debian" ]] && err "This script only supports Debian. Detected: $OS_NAME ($OS_ID)"
 
-log "Detected OS: $OS_ID ($CODENAME)"
+log "Detected: $OS_NAME $OS_VER"
 
 # ---------- User input ----------
 read -p "Panel Domain (FQDN, e.g., node.example.com): " FQDN
@@ -49,56 +47,59 @@ read -s -p "Admin Password (blank=random): " ADMIN_PASS
 echo
 if [[ -z "$ADMIN_PASS" ]]; then
   ADMIN_PASS="$(openssl rand -base64 18)"
-  warn "Random admin password: $ADMIN_PASS"
+  warn "Random password generated: $ADMIN_PASS"
 fi
 
+DB_NAME="pterodactyl"
+DB_USER="pterodactyl"
 DB_PASS="$(openssl rand -base64 32)"
 TIMEZONE="Asia/Kolkata"
-PANEL_PORT=8080
+
+log "Starting with: FQDN=$FQDN | Admin=$ADMIN_USER"
 
 read -p "Press Enter to continue..."
 
-
-# ---------- Remove old PHP repos ----------
+# ---------- Remove old Ondrej residues ----------
+log "Removing old Ondrej PPAs..."
 rm -f /etc/apt/sources.list.d/ondrej-php*.list || true
 rm -f /etc/apt/sources.list.d/*ondrej*.list || true
-sed -i '/ondrej\/php/d' /etc/apt/sources.list 2>/dev/null || true
+sed -i '/ondrej\/php/d' /etc/apt/sources.list
 apt-get update -y
+ok "Old PPAs removed."
 
-# ---------- Install base deps ----------
-log "Installing dependencies..."
-apt-get install -y ca-certificates curl wget lsb-release gnupg2 unzip git tar build-essential software-properties-common mariadb-server mariadb-client nginx redis-server openssl || true
-ok "Dependencies installed."
+# ---------- Install dependencies ----------
+log "Installing prerequisites..."
+apt-get install -y ca-certificates curl wget lsb-release gnupg2 unzip git tar build-essential openssl software-properties-common sudo || true
+ok "Prerequisites installed."
 
-# ---------- Install PHP 8.1 ----------
-if [[ "$OS_ID" == "debian" ]]; then
-  log "Adding Sury repository for PHP 8.1 (Debian)..."
-  curl -fsSL https://packages.sury.org/php/apt.gpg | gpg --dearmor -o /usr/share/keyrings/sury-archive-keyring.gpg
-  echo "deb [signed-by=/usr/share/keyrings/sury-archive-keyring.gpg] https://packages.sury.org/php/ $(lsb_release -sc) main" \
-      > /etc/apt/sources.list.d/sury-php.list
-  apt-get update -y
-  apt-get install -y php8.1 php8.1-fpm php8.1-cli php8.1-mbstring php8.1-xml php8.1-curl php8.1-zip php8.1-gd php8.1-bcmath php8.1-mysql
-elif [[ "$OS_ID" == "ubuntu" ]]; then
-  log "Adding Ondrej PPA (Ubuntu)..."
-  add-apt-repository -y ppa:ondrej/php
-  apt-get update -y
-  apt-get install -y php8.1 php8.1-fpm php8.1-cli php8.1-mbstring php8.1-xml php8.1-curl php8.1-zip php8.1-gd php8.1-bcmath php8.1-mysql
-fi
+# ---------- Install PHP 8.1 (Sury repo) ----------
+log "Installing PHP 8.1..."
+curl -fsSL https://packages.sury.org/php/apt.gpg | gpg --dearmor -o /usr/share/keyrings/sury-archive-keyring.gpg
+echo "deb [signed-by=/usr/share/keyrings/sury-archive-keyring.gpg] https://packages.sury.org/php/ $(lsb_release -sc) main" \
+  > /etc/apt/sources.list.d/sury-php.list
+apt-get update -y
+apt-get install -y php8.1 php8.1-fpm php8.1-cli php8.1-mbstring php8.1-xml php8.1-curl php8.1-zip php8.1-gd php8.1-bcmath php8.1-mysql
 ok "PHP 8.1 installed."
 
-# ---------- Configure MariaDB ----------
-log "Configuring MariaDB..."
+# ---------- Install Nginx, MariaDB, Redis ----------
+log "Installing Nginx, MariaDB, Redis..."
+DEBIAN_FRONTEND=noninteractive apt-get install -y nginx mariadb-server mariadb-client redis-server
 systemctl enable --now mariadb
+systemctl enable --now nginx
+systemctl enable --now redis-server
+ok "Web stack installed."
 
+# ---------- Create DB & user ----------
+log "Creating MariaDB database and user..."
 mysql <<SQL
-DROP DATABASE IF EXISTS pterodactyl;
-CREATE DATABASE pterodactyl;
-DROP USER IF EXISTS 'pterodactyl'@'127.0.0.1';
-CREATE USER 'pterodactyl'@'127.0.0.1' IDENTIFIED BY '$DB_PASS';
-GRANT ALL PRIVILEGES ON pterodactyl.* TO 'pterodactyl'@'127.0.0.1';
+DROP DATABASE IF EXISTS $DB_NAME;
+CREATE DATABASE $DB_NAME;
+DROP USER IF EXISTS '$DB_USER'@'127.0.0.1';
+CREATE USER '$DB_USER'@'127.0.0.1' IDENTIFIED BY '$DB_PASS';
+GRANT ALL PRIVILEGES ON $DB_NAME.* TO '$DB_USER'@'127.0.0.1';
 FLUSH PRIVILEGES;
 SQL
-ok "Database created: pterodactyl | User: pterodactyl | Password: $DB_PASS"
+ok "Database created. User: $DB_USER | Password: $DB_PASS"
 
 # ---------- Download Panel ----------
 log "Downloading Pterodactyl Panel..."
@@ -106,43 +107,45 @@ mkdir -p /var/www/pterodactyl
 cd /var/www/pterodactyl
 curl -sL -o panel.tar.gz https://github.com/pterodactyl/panel/releases/latest/download/panel.tar.gz
 tar -xzf panel.tar.gz
+rm panel.tar.gz
 chmod -R 755 storage bootstrap/cache
 cp .env.example .env || true
 
 # ---------- Update .env ----------
 log "Updating .env..."
-sed -i "s|DB_DATABASE=.*|DB_DATABASE=pterodactyl|" .env
-sed -i "s|DB_USERNAME=.*|DB_USERNAME=pterodactyl|" .env
+sed -i "s|DB_CONNECTION=.*|DB_CONNECTION=mysql|" .env
+sed -i "s|DB_HOST=.*|DB_HOST=127.0.0.1|" .env
+sed -i "s|DB_PORT=.*|DB_PORT=3306|" .env
+sed -i "s|DB_DATABASE=.*|DB_DATABASE=$DB_NAME|" .env
+sed -i "s|DB_USERNAME=.*|DB_USERNAME=$DB_USER|" .env
 sed -i "s|DB_PASSWORD=.*|DB_PASSWORD=$DB_PASS|" .env
 sed -i "s|APP_URL=.*|APP_URL=https://$FQDN|" .env
 sed -i "s|APP_TIMEZONE=.*|APP_TIMEZONE=$TIMEZONE|" .env
-grep -q '^MAIL_FROM_ADDRESS' .env || echo "MAIL_FROM_ADDRESS=noreply@$FQDN" >> .env
-grep -q '^MAIL_FROM_NAME' .env || echo "MAIL_FROM_NAME=\"Pterodactyl Panel\"" >> .env
 
-chown -R www-data:www-data /var/www/pterodactyl
+php artisan config:clear
+php artisan cache:clear
 
-# ---------- Composer install & migrations ----------
+# ---------- Composer dependencies ----------
 log "Installing PHP dependencies..."
 curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
 composer install --no-dev --optimize-autoloader --no-interaction
 php artisan key:generate --force
-php artisan config:clear
-php artisan cache:clear
 php artisan migrate --seed --force
 
 # ---------- Create admin user ----------
 log "Creating admin user..."
-php artisan p:user:make --email "$ADMIN_EMAIL" --username "$ADMIN_USER" --admin 1 --password "$ADMIN_PASS" --no-interaction --first_name "Admin" --last_name "User"
+php artisan p:user:make --email "$ADMIN_EMAIL" --username "$ADMIN_USER" --admin 1 --password "$ADMIN_PASS" --no-interaction
 
-# ---------- Create self-signed SSL ----------
+# ---------- SSL setup ----------
 log "Creating self-signed SSL..."
 mkdir -p /etc/certs/certs
 cd /etc/certs/certs
 openssl req -new -newkey rsa:4096 -days 3650 -nodes -x509 \
   -subj "/C=NA/ST=NA/L=NA/O=NA/CN=Generic SSL Certificate" \
   -keyout privkey.pem -out fullchain.pem
+ok "SSL generated at /etc/certs/certs"
 
-# ---------- Configure Nginx ----------
+# ---------- Nginx configuration ----------
 log "Configuring Nginx..."
 rm -f /etc/nginx/sites-enabled/default
 NGINX_CONF="/etc/nginx/sites-available/pterodactyl.conf"
@@ -150,7 +153,7 @@ cat > "$NGINX_CONF" <<EOF
 server {
     listen 80;
     server_name $FQDN;
-    return 301 https://\$server_name\$request_uri;
+    return 301 https://\$host\$request_uri;
 }
 
 server {
@@ -192,7 +195,6 @@ server {
         include fastcgi_params;
         fastcgi_param PHP_VALUE "upload_max_filesize = 100M \n post_max_size=100M";
         fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
-        fastcgi_intercept_errors off;
     }
 
     location ~ /\.ht {
@@ -201,16 +203,18 @@ server {
 }
 EOF
 
-ln -sf /etc/nginx/sites-available/pterodactyl.conf /etc/nginx/sites-enabled/pterodactyl.conf
-nginx -t && systemctl restart nginx || warn "Nginx reload failed."
+ln -sf "$NGINX_CONF" /etc/nginx/sites-enabled/pterodactyl.conf
+nginx -t && systemctl restart nginx
 
 # ---------- Finish ----------
-ok "PTERODACTYL PANEL INSTALL COMPLETE!"
+clear
+ok "PTERODACTYL PANEL INSTALL COMPLETE"
 echo "=========================================="
 echo "Panel HTTPS: https://$FQDN"
 echo "Admin username: $ADMIN_USER"
 echo "Admin email: $ADMIN_EMAIL"
 echo "Admin password: $ADMIN_PASS"
 echo "DB password (pterodactyl user): $DB_PASS"
-echo "Self-signed cert: /etc/certs/certs/"
+echo "SSL cert: /etc/certs/certs/"
 echo "=========================================="
+exit 0
