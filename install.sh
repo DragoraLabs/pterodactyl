@@ -1,10 +1,7 @@
 #!/bin/bash
-# PTERODACTYL PANEL INSTALLER (Debian/Ubuntu only)
-# - Supports: Debian 10/11/12 and Ubuntu 18.04/20.04/22.04/24.04
-# - Removes accidental ondrej residues, adds bullseye archive if needed
-# - Installs PHP 8.1 properly (Sury for Debian, PPA for Ubuntu)
-# - Auto-detects PHP-FPM socket
-# - Minimal panel-only install (no Wings)
+# UNIVERSAL PTERODACTYL PANEL INSTALLER
+# Supports: Debian 10/11/12, Ubuntu 20.04/22.04/24.04, AlmaLinux/Rocky/CentOS Stream 8+, RHEL 8+
+# Panel-only (no Wings), PHP 8.2+, auto DB/Admin setup
 # ==================================================
 
 set -euo pipefail
@@ -22,7 +19,7 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 clear
-echo -e "${GREEN}PTERODACTYL PANEL INSTALLER (Debian/Ubuntu)${NC}\n"
+echo -e "${GREEN}UNIVERSAL PTERODACTYL PANEL INSTALLER${NC}\n"
 
 # ---------- Detect OS ----------
 if [ -f /etc/os-release ]; then
@@ -35,12 +32,16 @@ else
   err "Cannot detect OS. /etc/os-release missing."
 fi
 
-case "$OS_ID" in
-  debian|ubuntu) ;;
-  *) err "Unsupported OS: $OS_NAME ($OS_ID). This installer supports Debian/Ubuntu only."; ;;
-esac
-
 log "Detected: $OS_NAME $OS_VER (codename: ${CODENAME:-unknown})"
+
+# Check supported OS
+SUPPORTED=false
+case "$OS_ID" in
+  debian) [[ "$OS_VER" =~ ^(10|11|12)$ ]] && SUPPORTED=true ;;
+  ubuntu) [[ "$OS_VER" =~ ^(20.04|22.04|24.04)$ ]] && SUPPORTED=true ;;
+  rocky|almalinux|centos|rhel) [[ "$OS_VER" =~ ^(8|9|stream8|stream9)$ ]] && SUPPORTED=true ;;
+esac
+$SUPPORTED || err "Unsupported OS: $OS_NAME $OS_VER"
 
 # ---------- User input ----------
 read -p "Panel FQDN (e.g. node.example.com): " FQDN
@@ -70,84 +71,70 @@ echo
 log "Starting with: FQDN=$FQDN | Admin=$ADMIN_USER | Port=$PANEL_PORT"
 read -p "Press Enter to continue..."
 
-
-# ---------- Remove ondrej residues (user requested) ----------
-log "Removing any ondrej (PPA) residues..."
-rm -f /etc/apt/sources.list.d/ondrej-php*.list || true
-rm -f /etc/apt/sources.list.d/*ondrej*.list || true
-sed -i '/ondrej\/php/d' /etc/apt/sources.list 2>/dev/null || true
-sed -i '/ppa.launchpad.net\/ondrej/d' /etc/apt/sources.list.d/* 2>/dev/null || true
-apt-get update -y || true
-ok "Removed ondrej residues (if any)."
-
-
-# ---------- Debian bullseye-archive handling ----------
-if [[ "$OS_ID" == "debian" && "$CODENAME" == "bullseye" ]]; then
-  log "Adding archived bullseye-backports (Debian 11) and disabling Check-Valid-Until..."
-  cat > /etc/apt/sources.list.d/bullseye-backports.list <<EOF
-deb http://archive.debian.org/debian bullseye-backports main contrib non-free
-EOF
-  echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99no-check-valid-until
-  apt-get update -y
-  ok "Bullseye archive backports added."
+# ---------- Remove Ondrej residues ----------
+if [[ "$OS_ID" == "debian" || "$OS_ID" == "ubuntu" ]]; then
+  log "Removing Ondrej PHP residues..."
+  rm -f /etc/apt/sources.list.d/ondrej-php*.list || true
+  rm -f /etc/apt/sources.list.d/*ondrej*.list || true
+  sed -i '/ondrej\/php/d' /etc/apt/sources.list 2>/dev/null || true
+  sed -i '/ppa.launchpad.net\/ondrej/d' /etc/apt/sources.list.d/* 2>/dev/null || true
+  apt-get update -y || true
+  ok "Ondrej residues removed."
 fi
 
 # ---------- Install base deps ----------
 log "Installing common prerequisites..."
-if [[ "$OS_ID" == "ubuntu" ]]; then
+if [[ "$OS_ID" == "debian" || "$OS_ID" == "ubuntu" ]]; then
   apt-get update -y
+  apt-get install -y ca-certificates curl wget lsb-release gnupg2 unzip git tar build-essential openssl software-properties-common || true
+elif [[ "$OS_ID" =~ (rocky|almalinux|centos|rhel) ]]; then
+  dnf install -y epel-release dnf-plugins-core curl wget lsb-release git unzip tar gcc make openssl || true
 fi
-apt-get install -y ca-certificates curl wget lsb-release gnupg2 unzip git tar build-essential openssl || true
 ok "Prerequisites installed."
 
-
-# ---------- Install PHP 8.1 (Sury for Debian, PPA for Ubuntu) ----------
+# ---------- PHP 8.2 install ----------
 install_php_debian() {
-  log "Installing PHP 8.1 on Debian via packages.sury.org..."
-  # add Sury GPG key and repo (works on Debian & Debian-based)
+  log "Installing PHP 8.2 on Debian..."
   curl -fsSL https://packages.sury.org/php/apt.gpg | gpg --dearmor -o /usr/share/keyrings/sury-archive-keyring.gpg
-  echo "deb [signed-by=/usr/share/keyrings/sury-archive-keyring.gpg] https://packages.sury.org/php/ $(lsb_release -sc) main" \
-    > /etc/apt/sources.list.d/sury-php.list
+  echo "deb [signed-by=/usr/share/keyrings/sury-archive-keyring.gpg] https://packages.sury.org/php/ $(lsb_release -sc) main" > /etc/apt/sources.list.d/sury-php.list
   apt-get update -y
-  apt-get install -y php8.1 php8.1-fpm php8.1-cli php8.1-mbstring php8.1-xml \
-    php8.1-curl php8.1-zip php8.1-gd php8.1-bcmath php8.1-mysql || \
-    err "Failed to install PHP 8.1 packages on Debian."
-  ok "PHP 8.1 installed (Debian)."
+  apt-get install -y php8.2 php8.2-fpm php8.2-cli php8.2-mbstring php8.2-xml php8.2-curl php8.2-zip php8.2-gd php8.2-bcmath php8.2-mysql || err "PHP 8.2 install failed"
+  ok "PHP 8.2 installed."
 }
 
 install_php_ubuntu() {
-  log "Installing PHP 8.1 on Ubuntu via Ondřej PPA..."
-  apt-get update -y
-  apt-get install -y software-properties-common
+  log "Installing PHP 8.2 on Ubuntu..."
   add-apt-repository -y ppa:ondrej/php
   apt-get update -y
-  apt-get install -y php8.1 php8.1-fpm php8.1-cli php8.1-mbstring php8.1-xml \
-    php8.1-curl php8.1-zip php8.1-gd php8.1-bcmath php8.1-mysql || \
-    err "Failed to install PHP 8.1 packages on Ubuntu."
-  ok "PHP 8.1 installed (Ubuntu)."
+  apt-get install -y php8.2 php8.2-fpm php8.2-cli php8.2-mbstring php8.2-xml php8.2-curl php8.2-zip php8.2-gd php8.2-bcmath php8.2-mysql || err "PHP 8.2 install failed"
+  ok "PHP 8.2 installed."
+}
+
+install_php_rhel() {
+  log "Installing PHP 8.2 on RHEL/CentOS/Rocky..."
+  dnf module reset -y php || true
+  dnf module enable -y php:remi-8.2 || true
+  dnf install -y php php-fpm php-cli php-mbstring php-xml php-curl php-zip php-gd php-bcmath php-mysqlnd || err "PHP 8.2 install failed"
+  ok "PHP 8.2 installed."
 }
 
 case "$OS_ID" in
-  debian)
-    install_php_debian
-    ;;
-  ubuntu)
-    install_php_ubuntu
-    ;;
+  debian) install_php_debian ;;
+  ubuntu) install_php_ubuntu ;;
+  rocky|almalinux|centos|rhel) install_php_rhel ;;
 esac
 
-
-# ---------- Install Nginx, MariaDB, Redis ----------
+# ---------- Nginx, MariaDB, Redis ----------
 log "Installing Nginx, MariaDB, Redis..."
-apt-get update -y
-DEBIAN_FRONTEND=noninteractive apt-get install -y nginx mariadb-server mariadb-client redis-server || \
-  err "Failed to install Nginx/MariaDB/Redis."
-ok "Nginx, MariaDB, Redis installed."
+if [[ "$OS_ID" == "debian" || "$OS_ID" == "ubuntu" ]]; then
+  DEBIAN_FRONTEND=noninteractive apt-get install -y nginx mariadb-server mariadb-client redis-server || err "Failed to install Nginx/MariaDB/Redis"
+elif [[ "$OS_ID" =~ (rocky|almalinux|centos|rhel) ]]; then
+  dnf install -y nginx mariadb-server mariadb redis || err "Failed to install Nginx/MariaDB/Redis"
+fi
+systemctl enable --now mariadb nginx redis || true
+ok "Nginx, MariaDB, Redis installed and started."
 
-# Start MariaDB
-systemctl enable --now mariadb || true
-
-# ---------- Create DB and user ----------
+# ---------- Create DB ----------
 log "Creating MySQL database and user..."
 mysql <<SQL || err "MySQL commands failed."
 DROP DATABASE IF EXISTS pterodactyl;
@@ -161,66 +148,45 @@ ok "Database created."
 
 # ---------- Composer ----------
 log "Installing Composer..."
-curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer || err "Composer install failed."
+curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer || err "Composer install failed"
 ok "Composer installed."
 
 # ---------- Panel download & setup ----------
-log "Downloading Panel (latest release tarball)..."
+log "Downloading Panel..."
 mkdir -p /var/www/pterodactyl
 cd /var/www/pterodactyl
-curl -sL -o panel.tar.gz https://github.com/pterodactyl/panel/releases/latest/download/panel.tar.gz || err "Failed to download panel tarball."
+curl -sL -o panel.tar.gz https://github.com/pterodactyl/panel/releases/latest/download/panel.tar.gz || err "Failed to download panel"
 tar -xzf panel.tar.gz
-chmod -R 755 storage bootstrap/cache || true
-cp .env.example .env || true
+chmod -R 755 storage bootstrap/cache
+cp .env.example .env
 
-# Put minimal env values (we will override key parts)
-log "Writing minimal .env adjustments..."
-sed -i "s|APP_URL=.*|APP_URL=http://$FQDN:$PANEL_PORT|" .env || true
-sed -i "s|DB_PASSWORD=.*|DB_PASSWORD=$DB_PASS|" .env || true
-sed -i "s|APP_TIMEZONE=.*|APP_TIMEZONE=$TIMEZONE|" .env || true
-# Set mail from if missing
+log "Updating .env values..."
+sed -i "s|APP_URL=.*|APP_URL=http://$FQDN:$PANEL_PORT|" .env
+sed -i "s|DB_PASSWORD=.*|DB_PASSWORD=$DB_PASS|" .env
+sed -i "s|APP_TIMEZONE=.*|APP_TIMEZONE=$TIMEZONE|" .env
 grep -q '^MAIL_FROM_ADDRESS' .env || echo "MAIL_FROM_ADDRESS=noreply@$FQDN" >> .env
 grep -q '^MAIL_FROM_NAME' .env || echo "MAIL_FROM_NAME=\"Pterodactyl Panel\"" >> .env
 
-chown -R www-data:www-data /var/www/pterodactyl || true
+chown -R www-data:www-data /var/www/pterodactyl
 
 # ---------- Composer install & migrations ----------
-log "Installing PHP dependencies (composer). This may take a while..."
-composer install --no-dev --optimize-autoloader --no-interaction || err "Composer install failed."
+log "Installing PHP dependencies..."
+composer install --no-dev --optimize-autoloader --no-interaction || err "Composer install failed"
 
-log "Generating app key and running migrations..."
+log "Generating app key & running migrations..."
 php artisan key:generate --force
 php artisan migrate --seed --force
 
 log "Creating admin user..."
 php artisan p:user:make --email "$ADMIN_EMAIL" --username "$ADMIN_USER" --admin 1 --password "$ADMIN_PASS" --no-interaction
 
-ok "Panel database and admin user set up."
-
-# ---------- PHP-FPM socket autodetect ----------
+# ---------- PHP-FPM socket ----------
 log "Detecting PHP-FPM socket..."
-PHP_FPM_SOCK=""
-# typical sockets
-for s in /run/php/php*-fpm.sock /var/run/php/php*-fpm.sock; do
-  if compgen -G "$s" > /dev/null; then
-    PHP_FPM_SOCK="$(compgen -G "$s" | head -n1)"
-    break
-  fi
-done
-
-# fallback to tcp if no socket
-if [[ -z "$PHP_FPM_SOCK" ]]; then
-  # check for service names
-  if systemctl is-active --quiet php8.1-fpm 2>/dev/null; then
-    PHP_FPM_SOCK="unix:/run/php/php8.1-fpm.sock"
-  else
-    PHP_FPM_SOCK="127.0.0.1:9000"
-  fi
-fi
+PHP_FPM_SOCK=$(find /run/php -name "php*-fpm.sock" | head -n1 || echo "127.0.0.1:9000")
 log "Using PHP-FPM socket: $PHP_FPM_SOCK"
 
-# ---------- Self-signed cert (placeholder) ----------
-log "Generating self-signed cert (3650 days)..."
+# ---------- Self-signed cert ----------
+log "Creating self-signed cert..."
 mkdir -p /etc/letsencrypt/live/"$FQDN"
 openssl req -new -newkey rsa:4096 -days 3650 -nodes -x509 \
   -subj "/CN=$FQDN/O=Pterodactyl" \
@@ -262,7 +228,7 @@ server {
         try_files \$uri \$uri/ /index.php?\$query_string;
     }
 
-    location ~ \.php$ {
+    location ~ \.php\$ {
         include fastcgi_params;
         fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
         fastcgi_pass $PHP_FPM_SOCK;
@@ -274,15 +240,11 @@ server {
     }
 }
 EOF
-
 ln -sf "$NGINX_CONF" /etc/nginx/sites-enabled/pterodactyl.conf
-# remove default if present
 rm -f /etc/nginx/sites-enabled/default /etc/nginx/sites-available/default || true
+nginx -t && systemctl restart nginx || warn "Nginx test failed"
 
-nginx -t && systemctl restart nginx || warn "Nginx config/test failed; check logs."
-
-# ---------- Reverse proxy for panel on port 8080 (optional) ----------
-log "Adding reverse-proxy config for Panel on port $PANEL_PORT -> internal (if needed)..."
+# ---------- Reverse proxy port ----------
 cat > /etc/nginx/sites-available/pterodactyl-8080.conf <<EOF
 server {
     listen $PANEL_PORT;
@@ -297,33 +259,24 @@ server {
 }
 EOF
 ln -sf /etc/nginx/sites-available/pterodactyl-8080.conf /etc/nginx/sites-enabled/
-
 systemctl reload nginx || true
 
-# ---------- Firewall (attempt UFW) ----------
-if command -v ufw >/dev/null 2>&1; then
-  log "Opening ports 80,443,$PANEL_PORT via UFW..."
-  ufw allow 80,443,"$PANEL_PORT" || true
-  ufw reload || true
-fi
-
 # ---------- Permissions ----------
-chown -R www-data:www-data /var/www/pterodactyl || true
-ok "Permissions set."
+chown -R www-data:www-data /var/www/pterodactyl
 
 # ---------- Output ----------
 clear
-ok "PTERODACTYL PANEL INSTALL COMPLETE (panel-only)"
+ok "PTERODACTYL PANEL INSTALL COMPLETE"
 echo "=========================================="
-echo "Panel HTTP (if used): http://$FQDN:$PANEL_PORT"
+echo "Panel HTTP (port $PANEL_PORT): http://$FQDN:$PANEL_PORT"
 echo "Panel HTTPS: https://$FQDN"
 echo "Admin username: $ADMIN_USER"
 echo "Admin email: $ADMIN_EMAIL"
 echo "Admin password: $ADMIN_PASS"
 echo "DB password (pterodactyl user): $DB_PASS"
 echo
-echo "Self-signed cert installed at /etc/letsencrypt/live/$FQDN/"
-echo "For production SSL run: certbot --nginx -d $FQDN"
+echo "Self-signed cert: /etc/letsencrypt/live/$FQDN/"
+echo "For production SSL: certbot --nginx -d $FQDN"
 echo "=========================================="
 
 exit 0
