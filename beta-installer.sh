@@ -1,5 +1,5 @@
 #!/bin/bash
-# Pterodactyl Panel Installer (Fixed)
+# Pterodactyl Panel Installer
 # Supports Debian 11+ and Ubuntu 20.04+/22.04+/24.04+
 set -euo pipefail
 IFS=$'\n\t'
@@ -33,7 +33,6 @@ fi
 
 log "Detected OS: $OS_NAME $OS_VER (codename: ${CODENAME:-unknown})"
 
-# ---------- Ask user ----------
 read -p "Panel Domain (FQDN, e.g. node.example.com): " FQDN
 [[ -z "$FQDN" ]] && err "FQDN required."
 
@@ -58,13 +57,13 @@ ADMIN_LAST=${ADMIN_LAST:-User}
 TIMEZONE="Asia/Kolkata"
 DB_NAME="pterodactyl"
 DB_USER="pterodactyl"
-# Use hex password (no slashes/newlines) to avoid SQL quoting issues
+
 DB_PASS="$(openssl rand -hex 16)"
 
 log "Working with: Domain=$FQDN | Admin=$ADMIN_USER | Email=$ADMIN_EMAIL"
 read -p "Press Enter to continue..."
 
-# ---------- Remove old Ondrej residues (safe) ----------
+
 log "Cleaning old ondrej residues (if any)..."
 rm -f /etc/apt/sources.list.d/ondrej-php*.list 2>/dev/null || true
 # remove any exact reference lines to ondrej to avoid resolute LSB issues
@@ -81,7 +80,7 @@ apt-get update -y
 apt-get install -y ca-certificates curl wget lsb-release gnupg2 software-properties-common unzip git tar build-essential openssl apt-transport-https || err "Failed to install prerequisites"
 ok "Prerequisites installed."
 
-# ---------- PHP repo & install (Debian vs Ubuntu) ----------
+
 log "Installing PHP (8.2 recommended)..."
 
 # Helper: install PHP packages list
@@ -98,7 +97,7 @@ if [[ "$OS_ID" == "debian" ]]; then
     err "PHP 8.2 install failed on Debian."
   fi
 else
-  # Ubuntu (try Ondrej; but if adding PPA fails or codename unsupported, fallback to sury)
+
   SUPPORTED_UBUNTU_CODENAMES=("bionic" "focal" "jammy" "noble") # noble = 24.04 LTS codename
   if printf '%s\n' "${SUPPORTED_UBUNTU_CODENAMES[@]}" | grep -qx "${CODENAME}"; then
     log "Adding Ondřej Surý PPA for PHP (Ubuntu ${CODENAME})..."
@@ -115,7 +114,7 @@ else
         _install_php_pkgs 8.2 || err "PHP install failed after fallback."
       fi
     else
-      # fallback to sury if PPA not available
+
       log "Ondrej PPA not present; using Sury as fallback."
       curl -fsSL https://packages.sury.org/php/apt.gpg | gpg --dearmor -o /usr/share/keyrings/sury-archive-keyring.gpg
       echo "deb [signed-by=/usr/share/keyrings/sury-archive-keyring.gpg] https://packages.sury.org/php/ ${CODENAME} main" > /etc/apt/sources.list.d/sury-php.list
@@ -140,7 +139,7 @@ fi
 ok "PHP 8.2 installed."
 systemctl enable --now php8.2-fpm || true
 
-# ---------- Install Nginx, MariaDB, Redis ----------
+# Install Nginx, MariaDB, Redis 
 log "Installing nginx, mariadb, redis..."
 DEBIAN_FRONTEND=noninteractive apt-get install -y nginx mariadb-server mariadb-client redis-server || err "Failed installing webstack"
 systemctl enable --now mariadb || true
@@ -148,7 +147,7 @@ systemctl enable --now nginx || true
 systemctl enable --now redis-server || true
 ok "Nginx, MariaDB, Redis installed."
 
-# ---------- Create DB and user ----------
+#  create DB and user 
 log "Creating MySQL database and user..."
 # Use here-doc safely; password is safe (hex)
 mysql -u root <<SQL || err "MySQL commands failed."
@@ -161,7 +160,8 @@ FLUSH PRIVILEGES;
 SQL
 ok "Database '${DB_NAME}' and user '${DB_USER}' created. (Password will be written to .env)"
 
-# ---------- Download panel ----------
+# Download panel
+
 log "Downloading Pterodactyl Panel..."
 mkdir -p /var/www/pterodactyl
 cd /var/www/pterodactyl
@@ -172,7 +172,7 @@ chmod -R 755 storage bootstrap/cache || true
 cp .env.example .env || true
 ok "Panel downloaded."
 
-# ---------- Update .env reliably ----------
+
 log "Updating .env (DB credentials, APP_URL, timezone)..."
 # ensure .env exists
 if [ ! -f .env ]; then
@@ -208,7 +208,7 @@ set_env "MAIL_FROM_NAME" "\"Pterodactyl Panel\""
 chown -R www-data:www-data /var/www/pterodactyl || true
 ok ".env updated with DB credentials and APP_URL."
 
-# ---------- Composer install & artisan tasks ----------
+
 log "Installing Composer and PHP dependencies..."
 curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer || err "Composer install failed"
 export COMPOSER_ALLOW_SUPERUSER=1
@@ -222,7 +222,7 @@ php artisan config:clear || true
 php artisan cache:clear || true
 php artisan migrate --seed --force || err "Migrations failed"
 
-# ---------- Create admin user ----------
+
 log "Creating admin user..."
 # NOTE: p:user:make expects --name-first and --name-last (older mistakes used --first-name)
 php artisan p:user:make \
@@ -236,7 +236,7 @@ php artisan p:user:make \
 
 ok "Admin user creation attempted."
 
-# ---------- PHP-FPM socket autodetect ----------
+
 log "Detecting PHP-FPM socket..."
 PHP_FPM_SOCK=""
 for s in /run/php/php*-fpm.sock /var/run/php/php*-fpm.sock; do
@@ -261,7 +261,7 @@ else
   FASTCGI_PASS="${PHP_FPM_SOCK}"
 fi
 
-# ---------- Create self-signed SSL ----------
+
 log "Creating self-signed SSL at /etc/certs/certs ..."
 mkdir -p /etc/certs/certs
 openssl req -new -newkey rsa:4096 -days 3650 -nodes -x509 \
@@ -273,7 +273,7 @@ chmod 644 /etc/certs/certs/fullchain.pem || true
 chmod 600 /etc/certs/certs/privkey.pem || true
 ok "Self-signed cert created."
 
-# ---------- Write Nginx config ----------
+
 log "Writing Nginx config to /etc/nginx/sites-available/pterodactyl.conf (and enabling)..."
 NGINX_CONF="/etc/nginx/sites-available/pterodactyl.conf"
 
@@ -345,7 +345,7 @@ ln -sf "${NGINX_CONF}" /etc/nginx/sites-enabled/pterodactyl.conf
 # test and reload nginx
 nginx -t && systemctl restart nginx || warn "nginx test/ restart failed - check logs"
 
-# ---------- Final output ----------
+
 clear
 ok "PTERODACTYL PANEL INSTALL COMPLETE"
 echo "=========================================="
