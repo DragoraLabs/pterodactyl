@@ -50,7 +50,8 @@ DB_PASS="$(openssl rand -hex 16)"
 log "Working with: Domain=$FQDN | Admin=$ADMIN_USER | Email=$ADMIN_EMAIL"
 read -p "Press Enter to continue..."
 log "Cleaning old ondrej residues (if any)..."
-rm -f /etc/apt/sources.list.d/ondrej-php*.list /etc/apt/sources.list.d/ondrej-ubuntu-php-*.sources 2>/dev/null || true
+# Aggressive removal of any ondrej-related files
+rm -f /etc/apt/sources.list.d/*ondrej*.* 2>/dev/null || true
 # remove any exact reference lines to ondrej to avoid resolute LSB issues
 if [ -d /etc/apt/sources.list.d ]; then
   for file in /etc/apt/sources.list.d/*.list; do
@@ -86,7 +87,7 @@ else
   if printf '%s\n' "${SUPPORTED_UBUNTU_CODENAMES[@]}" | grep -qx "${CODENAME}"; then
     log "Adding Ondřej Surý PPA for PHP (Ubuntu ${CODENAME})..."
     # make sure there aren't leftover entries causing 'resolute' style errors
-    rm -f /etc/apt/sources.list.d/ondrej-php*.list /etc/apt/sources.list.d/ondrej-ubuntu-php-*.sources 2>/dev/null || true
+    rm -f /etc/apt/sources.list.d/*ondrej*.* 2>/dev/null || true
     add-apt-repository -y ppa:ondrej/php || warn "add-apt-repository returned non-zero; will attempt manual addition."
     apt-get update -y || true
     if apt-cache policy | grep -q "ppa.launchpadcontent.net/ondrej/php"; then
@@ -95,21 +96,15 @@ else
       fi
     else
       log "Ondrej PPA not detected after auto-add; adding manually..."
-      # Manual addition with current key and deb822 .sources format
+      # Manual addition using legacy .list format to avoid deb822 issues
       curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xB8DC7E53946656EFBCE4C1DD71DAEAAB4AD4CAB6" | gpg --dearmor -o /usr/share/keyrings/ondrej-php.gpg || warn "GPG key fetch failed; continuing..."
-      cat > "/etc/apt/sources.list.d/ondrej-ubuntu-php-${CODENAME}.sources" << EOF
-Types: deb
-URIs: https://ppa.launchpadcontent.net/ondrej/php/ubuntu
-Suites: ${CODENAME}
-Components: main
-Signed-By: /usr/share/keyrings/ondrej-php.gpg
-EOF
+      echo "deb [signed-by=/usr/share/keyrings/ondrej-php.gpg] https://ppa.launchpadcontent.net/ondrej/php/ubuntu ${CODENAME} main" > "/etc/apt/sources.list.d/ondrej-ubuntu-php-${CODENAME}.list"
       apt-get update -y || warn "Manual PPA update returned non-zero."
       if apt-cache policy | grep -q "ppa.launchpadcontent.net/ondrej/php" && ! _install_php_pkgs 8.2; then
         err "PHP 8.2 install failed on Ubuntu with manual Ondrej PPA."
       elif ! apt-cache policy | grep -q "ppa.launchpadcontent.net/ondrej/php"; then
         warn "Manual PPA still not detected; falling back to Sury (may not support ${CODENAME})."
-        rm -f "/etc/apt/sources.list.d/ondrej-ubuntu-php-${CODENAME}.sources" 2>/dev/null || true
+        rm -f "/etc/apt/sources.list.d/ondrej-ubuntu-php-${CODENAME}.list" 2>/dev/null || true
         curl -fsSL https://packages.sury.org/php/apt.gpg | gpg --dearmor -o /usr/share/keyrings/sury-archive-keyring.gpg
         SURY_CODENAME="${CODENAME}"
         if ! curl -sI "https://packages.sury.org/php/dists/${SURY_CODENAME}/Release" >/dev/null 2>&1; then
