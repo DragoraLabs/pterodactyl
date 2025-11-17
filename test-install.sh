@@ -27,10 +27,17 @@ else
   err "/etc/os-release not found, cannot detect OS."
 fi
 log "Detected OS: $OS_NAME $OS_VER (codename: ${CODENAME:-unknown})"
+# Initialize variables to avoid unbound errors
+FQDN=""
+ADMIN_EMAIL=""
+ADMIN_USER=""
+ADMIN_PASS=""
+ADMIN_FIRST=""
+ADMIN_LAST=""
 read -p "Panel Domain (FQDN, e.g. node.example.com): " FQDN
 [[ -z "$FQDN" ]] && err "FQDN required."
 read -p "Admin Email [admin@$FQDN]: " ADMIN_EMAIL
-ADMIN_EMAIL=${ADMIN_EMAIL:-"admin@$FQDN}"
+ADMIN_EMAIL=${ADMIN_EMAIL:-"admin@$FQDN"}
 read -p "Admin Username [admin]: " ADMIN_USER
 ADMIN_USER=${ADMIN_USER:-admin}
 read -s -p "Admin Password (leave blank to generate random): " ADMIN_PASS
