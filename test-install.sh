@@ -30,7 +30,7 @@ log "Detected OS: $OS_NAME $OS_VER (codename: ${CODENAME:-unknown})"
 read -p "Panel Domain (FQDN, e.g. node.example.com): " FQDN
 [[ -z "$FQDN" ]] && err "FQDN required."
 read -p "Admin Email [admin@$FQDN]: " ADMIN_EMAIL
-ADMIN_EMAIL=${ADMIN_EMAIL:-"admin@$FQDN"}
+ADMIN_EMAIL=${ADMIN_EMAIL:-"admin@$FQDN}"
 read -p "Admin Username [admin]: " ADMIN_USER
 ADMIN_USER=${ADMIN_USER:-admin}
 read -s -p "Admin Password (leave blank to generate random): " ADMIN_PASS
@@ -50,10 +50,15 @@ DB_PASS="$(openssl rand -hex 16)"
 log "Working with: Domain=$FQDN | Admin=$ADMIN_USER | Email=$ADMIN_EMAIL"
 read -p "Press Enter to continue..."
 log "Cleaning old ondrej residues (if any)..."
-rm -f /etc/apt/sources.list.d/ondrej-php*.list 2>/dev/null || true
+rm -f /etc/apt/sources.list.d/ondrej-php*.list /etc/apt/sources.list.d/ondrej-ubuntu-php-*.sources 2>/dev/null || true
 # remove any exact reference lines to ondrej to avoid resolute LSB issues
 if [ -d /etc/apt/sources.list.d ]; then
-  sed -i '/ondrej/d' /etc/apt/sources.list.d/* 2>/dev/null || true
+  for file in /etc/apt/sources.list.d/*.list; do
+    [ -f "$file" ] && sed -i '/ondrej/d' "$file" 2>/dev/null || true
+  done
+  for file in /etc/apt/sources.list.d/*.sources; do
+    [ -f "$file" ] && sed -i '/ondrej/d' "$file" 2>/dev/null || true
+  done
 fi
 sed -i '/ondrej\/php/d' /etc/apt/sources.list 2>/dev/null || true
 apt-get update -y || true
@@ -81,23 +86,30 @@ else
   if printf '%s\n' "${SUPPORTED_UBUNTU_CODENAMES[@]}" | grep -qx "${CODENAME}"; then
     log "Adding Ondřej Surý PPA for PHP (Ubuntu ${CODENAME})..."
     # make sure there aren't leftover entries causing 'resolute' style errors
-    rm -f /etc/apt/sources.list.d/ondrej-php*.list 2>/dev/null || true
+    rm -f /etc/apt/sources.list.d/ondrej-php*.list /etc/apt/sources.list.d/ondrej-ubuntu-php-*.sources 2>/dev/null || true
     add-apt-repository -y ppa:ondrej/php || warn "add-apt-repository returned non-zero; will attempt manual addition."
     apt-get update -y || true
-    if apt-cache policy | grep -q "ondrej/php"; then
+    if apt-cache policy | grep -q "ppa.launchpadcontent.net/ondrej/php"; then
       if ! _install_php_pkgs 8.2; then
         err "PHP 8.2 install failed on Ubuntu with Ondrej PPA."
       fi
     else
       log "Ondrej PPA not detected after auto-add; adding manually..."
-      # Manual addition with current key and URL
+      # Manual addition with current key and deb822 .sources format
       curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xB8DC7E53946656EFBCE4C1DD71DAEAAB4AD4CAB6" | gpg --dearmor -o /usr/share/keyrings/ondrej-php.gpg || warn "GPG key fetch failed; continuing..."
-      echo "deb [signed-by=/usr/share/keyrings/ondrej-php.gpg] https://ppa.launchpadcontent.net/ondrej/php/ubuntu ${CODENAME} main" > /etc/apt/sources.list.d/ondrej-ubuntu-php-${CODENAME}.list
+      cat > "/etc/apt/sources.list.d/ondrej-ubuntu-php-${CODENAME}.sources" << EOF
+Types: deb
+URIs: https://ppa.launchpadcontent.net/ondrej/php/ubuntu
+Suites: ${CODENAME}
+Components: main
+Signed-By: /usr/share/keyrings/ondrej-php.gpg
+EOF
       apt-get update -y || warn "Manual PPA update returned non-zero."
-      if apt-cache policy | grep -q "ondrej/php" && ! _install_php_pkgs 8.2; then
+      if apt-cache policy | grep -q "ppa.launchpadcontent.net/ondrej/php" && ! _install_php_pkgs 8.2; then
         err "PHP 8.2 install failed on Ubuntu with manual Ondrej PPA."
-      elif ! apt-cache policy | grep -q "ondrej/php"; then
+      elif ! apt-cache policy | grep -q "ppa.launchpadcontent.net/ondrej/php"; then
         warn "Manual PPA still not detected; falling back to Sury (may not support ${CODENAME})."
+        rm -f "/etc/apt/sources.list.d/ondrej-ubuntu-php-${CODENAME}.sources" 2>/dev/null || true
         curl -fsSL https://packages.sury.org/php/apt.gpg | gpg --dearmor -o /usr/share/keyrings/sury-archive-keyring.gpg
         SURY_CODENAME="${CODENAME}"
         if ! curl -sI "https://packages.sury.org/php/dists/${SURY_CODENAME}/Release" >/dev/null 2>&1; then
