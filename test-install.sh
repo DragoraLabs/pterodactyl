@@ -49,24 +49,18 @@ DB_USER="pterodactyl"
 DB_PASS="$(openssl rand -hex 16)"
 log "Working with: Domain=$FQDN | Admin=$ADMIN_USER | Email=$ADMIN_EMAIL"
 read -p "Press Enter to continue..."
-log "Cleaning old ondrej residues (if any)..."
-# Aggressive removal of any ondrej-related files
-rm -f /etc/apt/sources.list.d/*ondrej*.* 2>/dev/null || true
-# remove any exact reference lines to ondrej to avoid resolute LSB issues
-if [ -d /etc/apt/sources.list.d ]; then
-  for file in /etc/apt/sources.list.d/*.list; do
-    [ -f "$file" ] && sed -i '/ondrej/d' "$file" 2>/dev/null || true
-  done
-  for file in /etc/apt/sources.list.d/*.sources; do
-    [ -f "$file" ] && sed -i '/ondrej/d' "$file" 2>/dev/null || true
-  done
+log "Aggressively cleaning old ondrej residues (if any)..."
+# Delete any ondrej-related files
+find /etc/apt/sources.list.d -name '*ondrej*' -delete 2>/dev/null || true
+# Remove lines referencing ondrej
+if [ -f /etc/apt/sources.list ]; then
+  sed -i '/ondrej\/php/d' /etc/apt/sources.list
 fi
-sed -i '/ondrej\/php/d' /etc/apt/sources.list 2>/dev/null || true
 apt-get update -y || true
 ok "Cleaned."
 # ---------- Install base packages ----------
 log "Installing prerequisites..."
-apt-get update -y
+apt-get update -y || warn "Initial apt update had issues; continuing."
 apt-get install -y ca-certificates curl wget lsb-release gnupg2 software-properties-common unzip git tar build-essential openssl apt-transport-https || err "Failed to install prerequisites"
 ok "Prerequisites installed."
 log "Installing PHP (8.2 recommended)..."
@@ -86,25 +80,26 @@ else
   SUPPORTED_UBUNTU_CODENAMES=("bionic" "focal" "jammy" "noble") # noble = 24.04 LTS codename
   if printf '%s\n' "${SUPPORTED_UBUNTU_CODENAMES[@]}" | grep -qx "${CODENAME}"; then
     log "Adding Ondřej Surý PPA for PHP (Ubuntu ${CODENAME})..."
-    # make sure there aren't leftover entries causing 'resolute' style errors
-    rm -f /etc/apt/sources.list.d/*ondrej*.* 2>/dev/null || true
+    # Ensure clean
+    find /etc/apt/sources.list.d -name '*ondrej*' -delete 2>/dev/null || true
     add-apt-repository -y ppa:ondrej/php || warn "add-apt-repository returned non-zero; will attempt manual addition."
     apt-get update -y || true
-    if apt-cache policy | grep -q "ppa.launchpadcontent.net/ondrej/php"; then
+    # Check if PHP 8.2 is available
+    if apt-cache show php8.2 >/dev/null 2>&1; then
       if ! _install_php_pkgs 8.2; then
         err "PHP 8.2 install failed on Ubuntu with Ondrej PPA."
       fi
     else
-      log "Ondrej PPA not detected after auto-add; adding manually..."
-      # Manual addition using legacy .list format to avoid deb822 issues
+      log "Ondrej PPA not providing PHP 8.2; adding manually..."
+      # Manual addition using .list format
       curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xB8DC7E53946656EFBCE4C1DD71DAEAAB4AD4CAB6" | gpg --dearmor -o /usr/share/keyrings/ondrej-php.gpg || warn "GPG key fetch failed; continuing..."
       echo "deb [signed-by=/usr/share/keyrings/ondrej-php.gpg] https://ppa.launchpadcontent.net/ondrej/php/ubuntu ${CODENAME} main" > "/etc/apt/sources.list.d/ondrej-ubuntu-php-${CODENAME}.list"
       apt-get update -y || warn "Manual PPA update returned non-zero."
-      if apt-cache policy | grep -q "ppa.launchpadcontent.net/ondrej/php" && ! _install_php_pkgs 8.2; then
+      if apt-cache show php8.2 >/dev/null 2>&1 && ! _install_php_pkgs 8.2; then
         err "PHP 8.2 install failed on Ubuntu with manual Ondrej PPA."
-      elif ! apt-cache policy | grep -q "ppa.launchpadcontent.net/ondrej/php"; then
-        warn "Manual PPA still not detected; falling back to Sury (may not support ${CODENAME})."
-        rm -f "/etc/apt/sources.list.d/ondrej-ubuntu-php-${CODENAME}.list" 2>/dev/null || true
+      elif ! apt-cache show php8.2 >/dev/null 2>&1; then
+        warn "Manual PPA still not providing PHP 8.2; falling back to Sury (may not support ${CODENAME})."
+        find /etc/apt/sources.list.d -name '*ondrej*' -delete 2>/dev/null || true
         curl -fsSL https://packages.sury.org/php/apt.gpg | gpg --dearmor -o /usr/share/keyrings/sury-archive-keyring.gpg
         SURY_CODENAME="${CODENAME}"
         if ! curl -sI "https://packages.sury.org/php/dists/${SURY_CODENAME}/Release" >/dev/null 2>&1; then
