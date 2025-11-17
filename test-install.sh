@@ -1,6 +1,9 @@
 #!/bin/bash
-# Pterodactyl Panel Installer
-# Supports Debian 11+ and Ubuntu 20.04+/22.04+/24.04+
+# ============================================
+#  Pterodactyl Installer + Wings + Menu
+#  Supports Debian 11/12 and Ubuntu 20–24
+# ============================================
+
 set -euo pipefail
 IFS=$'\n\t'
 
@@ -14,6 +17,57 @@ err(){ echo -e "${RED}[ERROR]${NC} $1" >&2; exit 1; }
 # Require root
 if [ "$EUID" -ne 0 ]; then
   err "Run this script as root (sudo)."
+fi
+
+###############################################
+#                 MENU                        #
+###############################################
+
+clear
+echo -e "${GREEN}============================================${NC}"
+echo -e "${GREEN}      Pterodactyl Auto Installer Menu       ${NC}"
+echo -e "${GREEN}============================================${NC}"
+echo
+echo "1) Install Pterodactyl Panel"
+echo "2) Install Wings (Node)"
+echo "3) System Information"
+echo "0) Exit"
+echo
+
+read -p "Choose an option: " MENU_CHOICE
+
+###############################################
+#                SYSTEM INFO                  #
+###############################################
+
+if [[ "$MENU_CHOICE" == "3" ]]; then
+  echo -e "${BLUE}System Info:${NC}"
+  echo "-----------------------"
+  echo "OS: $(lsb_release -d | awk -F: '{print $2}')"
+  echo "Kernel: $(uname -r)"
+  echo "CPU: $(lscpu | grep 'Model name' | awk -F: '{print $2}')"
+  echo "RAM: $(free -h | awk '/Mem/ {print $2}')"
+  echo "Disk: $(df -h / | awk '/\// {print $2}')"
+  echo "-----------------------"
+  exit 0
+fi
+
+###############################################
+#                WINGS PLACEHOLDER            #
+###############################################
+
+if [[ "$MENU_CHOICE" == "2" ]]; then
+  echo -e "${YELLOW}Wings installer will be added soon...${NC}"
+  exit 0
+fi
+
+###############################################
+#        PANEL INSTALLER STARTS HERE          #
+###############################################
+
+if [[ "$MENU_CHOICE" != "1" ]]; then
+  echo "Invalid option!"
+  exit 1
 fi
 
 clear
@@ -72,24 +126,19 @@ DB_PASS="$(openssl rand -hex 16)"
 log "Working with: Domain=$FQDN | Admin=$ADMIN_USER | Email=$ADMIN_EMAIL"
 read -p "Press Enter to continue..."
 
-# ---------------- Cleanup Ondrej ----------------
-log "Aggressively cleaning old ondrej residues (if any)..."
-
+# Cleanup Ondrej PPA
+log "Cleaning old ondrej PHP PPA..."
 find /etc/apt/sources.list.d -name '*ondrej*' -delete 2>/dev/null || true
-
-if [ -f /etc/apt/sources.list ]; then
-  sed -i '/ondrej\/php/d' /etc/apt/sources.list
-fi
-
+sed -i '/ondrej\/php/d' /etc/apt/sources.list || true
 apt-get update -y || true
-ok "Cleaned old PHP PPA."
+ok "Cleaned."
 
-# ---------------- Prerequisites ----------------
+# Install prerequisites
 log "Installing prerequisites..."
 apt-get install -y ca-certificates curl wget tar unzip git lsb-release gnupg2 software-properties-common
 ok "Base packages installed."
 
-# ---------------- PHP Selection ----------------
+# PHP selection
 echo
 echo "Choose PHP version:"
 echo "  1) 8.1"
@@ -105,26 +154,23 @@ case "$PHP_CHOICE" in
   *) PHP_VER="8.2" ;;
 esac
 
-ok "Installing PHP $PHP_VER..."
-
-# -------- Install PHP (SURY) --------
+# Install PHP
+log "Installing PHP $PHP_VER..."
 curl -fsSL https://packages.sury.org/php/apt.gpg | gpg --dearmor -o /usr/share/keyrings/sury-archive-keyring.gpg
-printf "deb [signed-by=/usr/share/keyrings/sury-archive-keyring.gpg] https://packages.sury.org/php/ %s main\n" "${CODENAME}" > /etc/apt/sources.list.d/sury-php.list || true
-
+echo "deb [signed-by=/usr/share/keyrings/sury-archive-keyring.gpg] https://packages.sury.org/php/ ${CODENAME} main" \
+ > /etc/apt/sources.list.d/sury-php.list
 apt-get update -y
 apt-get install -y php${PHP_VER} php${PHP_VER}-fpm php${PHP_VER}-cli php${PHP_VER}-mbstring php${PHP_VER}-xml php${PHP_VER}-curl php${PHP_VER}-zip php${PHP_VER}-gd php${PHP_VER}-bcmath php${PHP_VER}-mysql
-
 systemctl enable --now php${PHP_VER}-fpm
 ok "PHP installed."
 
-# ---------------- Web Stack ----------------
-log "Installing Nginx, MariaDB, Redis..."
+# Install web stack
+log "Installing NGINX, MariaDB, Redis..."
 apt-get install -y nginx mariadb-server redis-server
 systemctl enable --now nginx mariadb redis-server
-ok "Web stack ready."
 
-# ---------------- Database ----------------
-log "Creating database and user..."
+# MySQL
+log "Creating MySQL database..."
 mysql -u root <<SQL
 DROP DATABASE IF EXISTS \`${DB_NAME}\`;
 CREATE DATABASE \`${DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
@@ -133,19 +179,17 @@ CREATE USER '${DB_USER}'@'127.0.0.1' IDENTIFIED BY '${DB_PASS}';
 GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'127.0.0.1';
 FLUSH PRIVILEGES;
 SQL
-ok "Database ready."
 
-# ---------------- Download Panel ----------------
+# Download panel
 log "Downloading Pterodactyl Panel..."
 mkdir -p /var/www/pterodactyl
 cd /var/www/pterodactyl
-
 curl -sL -o panel.tar.gz https://github.com/pterodactyl/panel/releases/latest/download/panel.tar.gz
 tar -xzf panel.tar.gz
 rm panel.tar.gz
 cp .env.example .env
 
-# ---------------- .env ----------------
+# .env function
 set_env() {
   key="$1"; val="$2"
   if grep -q "^$key=" .env; then
@@ -155,13 +199,12 @@ set_env() {
   fi
 }
 
-log "Writing .env..."
-
+# .env values
+log "Configuring .env..."
 set_env APP_URL "https://$FQDN"
 set_env APP_TIMEZONE "$TIMEZONE"
 set_env APP_ENVIRONMENT_ONLY false
 
-set_env DB_CONNECTION mysql
 set_env DB_HOST 127.0.0.1
 set_env DB_PORT 3306
 set_env DB_DATABASE "$DB_NAME"
@@ -173,44 +216,38 @@ set_env SESSION_DRIVER redis
 set_env QUEUE_CONNECTION redis
 set_env REDIS_HOST 127.0.0.1
 
-set_env MAIL_FROM_ADDRESS "noreply@$FQDN"
-set_env MAIL_FROM_NAME "\"Pterodactyl Panel\""
-
+# generate temporary key
 TMP_APP_KEY="base64:$(openssl rand -base64 32 | tr -d '\n')"
 set_env APP_KEY "$TMP_APP_KEY"
 
 chown -R www-data:www-data /var/www/pterodactyl
-ok ".env updated."
 
-# ---------------- Composer ----------------
-log "Installing composer..."
+# composer
+log "Installing Composer..."
 curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
-
 export COMPOSER_ALLOW_SUPERUSER=1
-composer install --no-dev --prefer-dist --optimize-autoloader --no-interaction
 
-# Laravel setup
+composer install --no-dev --prefer-dist --optimize-autoloader --no-interaction
 php artisan key:generate --force
 php artisan migrate --seed --force
-ok "Panel backend installed."
 
-# Create admin user
+# Admin user
 php artisan p:user:make \
- --email "$ADMIN_EMAIL" \
- --username "$ADMIN_USER" \
- --name-first "$ADMIN_FIRST" \
- --name-last "$ADMIN_LAST" \
- --password "$ADMIN_PASS" \
- --admin 1 --no-interaction || true
+  --email "$ADMIN_EMAIL" \
+  --username "$ADMIN_USER" \
+  --name-first "$ADMIN_FIRST" \
+  --name-last "$ADMIN_LAST" \
+  --password "$ADMIN_PASS" \
+  --admin 1 --no-interaction || true
 
-# ---------------- SSL ----------------
+# SSL
 mkdir -p /etc/certs/certs
 openssl req -new -newkey rsa:4096 -days 3650 -nodes -x509 \
  -subj "/CN=$FQDN/O=Pterodactyl" \
  -keyout /etc/certs/certs/privkey.pem \
  -out /etc/certs/certs/fullchain.pem
 
-# ---------------- Nginx Config ----------------
+# NGINX
 NGINX_CONF="/etc/nginx/sites-available/pterodactyl.conf"
 
 cat > "$NGINX_CONF" <<EOF
@@ -249,8 +286,9 @@ ln -sf "$NGINX_CONF" /etc/nginx/sites-enabled/pterodactyl.conf
 nginx -t
 systemctl restart nginx
 
+# DONE
 clear
-ok "Pterodactyl Installed!"
+ok "Pterodactyl Installed Successfully!"
 
 echo "========================================="
 echo " Panel URL: https://$FQDN"
@@ -262,7 +300,7 @@ echo " DB Pass: $DB_PASS"
 echo "========================================="
 echo
 echo -e "${YELLOW}If using Cloudflare:${NC}"
-echo " Service Type (Required) = URL"
+echo " Service Type = URL"
 echo " URL = https://localhost:443"
 echo " TLS → No TLS Verify = ON"
 echo "========================================="
