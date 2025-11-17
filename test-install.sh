@@ -1,23 +1,23 @@
-#!/bin/bash
-# Pterodactyl Full Auto-Installer (Panel + Wings)
-# Supports Debian 11/12 and Ubuntu 20.04/22.04/24.04
-# Interactive menu: Panel / Wings / Panel+Wings / System info / Exit
-# WARNING: This script performs system installs (apt, composer, nginx, mariadb, redis, systemd services).
+#!/usr/bin/env bash
+# Pterodactyl FULL Auto-Installer (Panel + Wings + Cloudflare guidance)
+# Supports Debian 11/12 and Ubuntu 20.04/22.04/24.04 (and WSL2)
+# WARNING: run as root. This will install packages, write certs and services.
 set -euo pipefail
 IFS=$'\n\t'
 
-# ---------------- Colors & helpers ----------------
+# ---------- Colors ----------
 RED='\033[1;31m'; GREEN='\033[1;32m'; YELLOW='\033[1;33m'; BLUE='\033[1;34m'; NC='\033[0m'
 log(){ echo -e "${BLUE}[INFO]${NC} $1"; }
 ok(){ echo -e "${GREEN}[OK]${NC} $1"; }
 warn(){ echo -e "${YELLOW}[WARN]${NC} $1"; }
 err(){ echo -e "${RED}[ERROR]${NC} $1" >&2; exit 1; }
 
+# ---------- Require root ----------
 if [ "$EUID" -ne 0 ]; then
   err "Run this script as root (sudo)."
 fi
 
-# ---------------- Detect OS ----------------
+# ---------- Detect OS ----------
 if [ -f /etc/os-release ]; then
   . /etc/os-release
   OS_ID="$ID"
@@ -25,163 +25,201 @@ if [ -f /etc/os-release ]; then
   OS_VER="$VERSION_ID"
   CODENAME="$(lsb_release -sc 2>/dev/null || true)"
 else
-  err "/etc/os-release not found, cannot detect OS."
+  err "/etc/os-release not found — cannot detect OS."
 fi
 log "Detected OS: $OS_NAME $OS_VER (codename: ${CODENAME:-unknown})"
 
-# ---------------- Utility functions ----------------
-ask() {
-  local prompt="$1" default="$2" var
-  read -p "$prompt" var
-  if [ -z "$var" ]; then
-    echo "$default"
+# ---------- Helpers ----------
+set_env() {
+  local key="$1"; local val="$2"
+  if grep -qE "^${key}=" "$ENVFILE" 2>/dev/null; then
+    sed -i "s|^${key}=.*|${key}=${val}|" "$ENVFILE"
   else
-    echo "$var"
+    echo "${key}=${val}" >> "$ENVFILE"
   fi
 }
 
-set_env_value() {
-  # args: key value (writes to .env in current dir)
-  local key="$1" value="$2"
-  if grep -qE "^${key}=" .env 2>/dev/null; then
-    sed -i "s|^${key}=.*|${key}=${value}|" .env
-  else
-    echo "${key}=${value}" >> .env
-  fi
+_install_php_pkgs() {
+  local ver="$1"
+  apt-get install -y "php${ver}" "php${ver}-fpm" "php${ver}-cli" "php${ver}-mbstring" "php${ver}-xml" "php${ver}-curl" "php${ver}-zip" "php${ver}-gd" "php${ver}-bcmath" "php${ver}-mysql" || return 1
+  return 0
 }
 
-# ---------------- Menu ----------------
-show_menu() {
-  cat <<'MENU'
-
+# ---------- Menu ----------
+cat <<'MENU'
 ============================================
       Pterodactyl Full Auto-Installer
 ============================================
-1) Install Panel (Pterodactyl)
-2) Install Wings (node)
-3) Install Panel + Wings
-4) System info
-5) Exit
+  1) Install Panel only
+  2) Install Wings (node) only
+  3) Install Panel + Wings (full)
+  4) System info
+  5) Exit
 MENU
-  read -p "Choose an option [1-5]: " MENU_CHOICE
-  echo "$MENU_CHOICE"
-}
 
-# ---------------- Common cleanup for ondrej issues ----------------
-cleanup_ondrej() {
-  log "Cleaning any broken/old ondrej PPA files..."
-  shopt -s nullglob
-  for f in /etc/apt/sources.list.d/*ondrej* /etc/apt/sources.list.d/*ubuntu-php*; do
-    [ -f "$f" ] && rm -f "$f"
-  done
-  for s in /etc/apt/sources.list.d/*.sources; do
-    if grep -qi "ondrej" "$s" 2>/dev/null; then rm -f "$s"; fi
-  done
-  sed -i '/ondrej\/php/d' /etc/apt/sources.list 2>/dev/null || true
-  apt-get update -y >/dev/null 2>&1 || true
-  ok "Ondrej residues removed."
-}
+read -p "Choose an option [1-5] (default 3 - full): " MENU_CHOICE
+MENU_CHOICE=${MENU_CHOICE:-3}
 
-# ---------------- Panel Installer ----------------
-install_panel() {
-  log "=== PANEL INSTALLER ==="
+# ---------- Common interactive inputs ----------
+ask_common_panel() {
+  read -p "Panel Domain (FQDN, e.g. panel.example.com): " FQDN
+  [[ -z "$FQDN" ]] && err "FQDN required."
 
-  # Ask interactive questions
-  FQDN="$(ask 'Panel Domain (FQDN, e.g. panel.example.com): ' '')"
-  if [ -z "$FQDN" ]; then err "FQDN required."; fi
+  read -p "Admin Email [admin@${FQDN}]: " ADMIN_EMAIL
+  ADMIN_EMAIL=${ADMIN_EMAIL:-"admin@${FQDN}"}
 
-  ADMIN_EMAIL="$(ask "Admin Email [admin@$FQDN]: " "admin@$FQDN")"
-  ADMIN_USER="$(ask "Admin Username [admin]: " "admin")"
+  read -p "Admin Username [admin]: " ADMIN_USER
+  ADMIN_USER=${ADMIN_USER:-admin}
+
   read -s -p "Admin Password (leave blank to auto-generate): " ADMIN_PASS
   echo
-  if [ -z "$ADMIN_PASS" ]; then
+  if [[ -z "$ADMIN_PASS" ]]; then
     ADMIN_PASS="$(openssl rand -base64 18)"
     warn "Random admin password generated: $ADMIN_PASS"
   fi
-  ADMIN_FIRST="$(ask "Admin First Name [Admin]: " "Admin")"
-  ADMIN_LAST="$(ask "Admin Last Name [User]: " "User")"
+
+  read -p "Admin First Name [Admin]: " ADMIN_FIRST
+  ADMIN_FIRST=${ADMIN_FIRST:-Admin}
+  read -p "Admin Last Name [User]: " ADMIN_LAST
+  ADMIN_LAST=${ADMIN_LAST:-User}
 
   echo
   echo "Choose PHP version:"
-  echo " 1) 8.1"
-  echo " 2) 8.2 (recommended)"
-  echo " 3) 8.3"
-  PHP_CHOICE="$(ask "Select (1/2/3) [2]: " "2")"
+  echo "  1) 8.1"
+  echo "  2) 8.2 (recommended)"
+  echo "  3) 8.3"
+  read -p "Select (1/2/3) [2]: " PHP_CHOICE
+  PHP_CHOICE=${PHP_CHOICE:-2}
   case "$PHP_CHOICE" in
-    1) PHP_VER="8.1";;
-    2) PHP_VER="8.2";;
-    3) PHP_VER="8.3";;
-    *) PHP_VER="8.2";;
+    1) PHP_VER="8.1" ;;
+    2) PHP_VER="8.2" ;;
+    3) PHP_VER="8.3" ;;
+    *) PHP_VER="8.2" ;;
   esac
 
   TIMEZONE="Asia/Kolkata"
   DB_NAME="pterodactyl"
   DB_USER="pterodactyl"
-  DB_PASS="$(openssl rand -hex 16)"  # safe for SQL
+  DB_PASS="$(openssl rand -hex 16)"
 
-  log "Panel will be installed for ${FQDN}. PHP ${PHP_VER}. DB user ${DB_USER}."
+  log "Panel will be installed for domain: ${FQDN}, PHP ${PHP_VER}"
+}
 
-  read -p "Press Enter to continue (or Ctrl+C to cancel) ..."
+ask_common_wings() {
+  read -p "Wings Node FQDN (e.g. node.panel.example.com) [use same domain if single host]: " WINGS_FQDN
+  WINGS_FQDN=${WINGS_FQDN:-$FQDN}
 
-  # Clean ondrej files that cause errors
-  cleanup_ondrej
+  read -p "Wings Port (panel-facing) [default 8080]: " WINGS_PORT
+  WINGS_PORT=${WINGS_PORT:-8080}
 
-  # Install prerequisites
-  log "Installing prerequisites..."
+  read -p "Wings Bind Port (internal bind for servers, default 2022): " WINGS_BIND_PORT
+  WINGS_BIND_PORT=${WINGS_BIND_PORT:-2022}
+
+  read -p "Node UUID (from Panel): " NODE_UUID
+  read -p "Token ID (from Panel): " TOKEN_ID
+  read -p "Token (from Panel): " TOKEN_SECRET
+
+  read -p "Always generate/overwrite certs at /etc/certs? (yes/no) [yes]: " GEN_CERTS
+  GEN_CERTS=${GEN_CERTS:-yes}
+}
+
+sys_info() {
+  echo "---- System info ----"
+  uname -a
+  echo
+  lsb_release -a 2>/dev/null || true
+  echo
+  echo "Memory:"
+  free -h
+  echo
+  echo "Disk:"
+  df -h
+  echo "---------------------"
+}
+
+# ---------- Steps: common cleaning & prerequisites ----------
+common_prep() {
+  log "Cleaning old Ondrej residues (if any)..."
+  shopt -s nullglob
+  for f in /etc/apt/sources.list.d/*ondrej* /etc/apt/sources.list.d/*ubuntu-php*; do
+    [ -f "$f" ] && rm -f "$f" || true
+  done
+  for s in /etc/apt/sources.list.d/*.sources; do
+    if grep -qi "ondrej" "$s" 2>/dev/null; then rm -f "$s"; fi
+  done
+  sed -i '/ondrej\/php/d' /etc/apt/sources.list 2>/dev/null || true
+  apt-get update -y || true
+  ok "Cleaned."
+
+  log "Installing base prerequisites..."
   apt-get update -y
-  apt-get install -y ca-certificates curl wget lsb-release gnupg2 software-properties-common unzip git tar build-essential openssl apt-transport-https || err "Failed installing prerequisites"
+  apt-get install -y ca-certificates curl wget gnupg2 lsb-release apt-transport-https software-properties-common unzip git tar build-essential openssl || err "Failed prerequisites"
   ok "Prerequisites installed."
+}
 
-  # Install PHP via Sury (Debian) or Ondrej/Sury fallback (Ubuntu)
-  log "Installing PHP ${PHP_VER}..."
-  _install_php_pkgs() {
-    apt-get install -y "php${1}" "php${1}-fpm" "php${1}-cli" "php${1}-mbstring" "php${1}-xml" "php${1}-curl" "php${1}-zip" "php${1}-gd" "php${1}-bcmath" "php${1}-mysql" || return 1
-    return 0
-  }
+# ---------- Install PHP ----------
+install_php() {
+  local ver="$1"
+  log "Installing PHP ${ver}..."
 
   if [[ "$OS_ID" == "debian" ]]; then
+    log "Adding Sury repo for Debian..."
     curl -fsSL https://packages.sury.org/php/apt.gpg | gpg --dearmor -o /usr/share/keyrings/sury-archive-keyring.gpg
     SURY_CODENAME="${CODENAME:-bullseye}"
+    if ! curl -sI "https://packages.sury.org/php/dists/${SURY_CODENAME}/Release" >/dev/null 2>&1; then
+      SURY_CODENAME="bullseye"
+      warn "Sury codename fallback -> ${SURY_CODENAME}"
+    fi
     printf "deb [signed-by=/usr/share/keyrings/sury-archive-keyring.gpg] https://packages.sury.org/php/ %s main\n" "${SURY_CODENAME}" > /etc/apt/sources.list.d/sury-php.list
     apt-get update -y
-    _install_php_pkgs "${PHP_VER}" || err "PHP install failed (Debian)"
+    _install_php_pkgs "${ver}" || err "PHP ${ver} failed on Debian"
   else
-    # Try Ondrej PPA for supported codenames else fallback to Sury
+    # Ubuntu: try Ondrej PPA for supported codenames, else fallback to Sury
     SUPPORTED_UBUNTU_CODENAMES=("bionic" "focal" "jammy" "noble")
-    if printf '%s\n' "${SUPPORTED_UBUNTU_CODENAMES[@]}" | grep -qx "${CODENAME:-}"; then
-      add-apt-repository -y ppa:ondrej/php || warn "add-apt-repository failed (continuing to fallback)"
+    if printf '%s\n' "${SUPPORTED_UBUNTU_CODENAMES[@]}" | grep -qx "${CODENAME}"; then
+      add-apt-repository -y ppa:ondrej/php || warn "add-apt-repository returned non-zero"
       apt-get update -y || true
       if apt-cache policy | grep -q "ppa.launchpadcontent.net/ondrej/php"; then
-        if ! _install_php_pkgs "${PHP_VER}"; then
-          warn "Ondrej install failed — falling back to Sury"
-        fi
+        _install_php_pkgs "${ver}" || warn "Ondrej install failed, will try Sury fallback"
       fi
     fi
     if ! command -v php >/dev/null 2>&1; then
       curl -fsSL https://packages.sury.org/php/apt.gpg | gpg --dearmor -o /usr/share/keyrings/sury-archive-keyring.gpg
       SURY_CODENAME="${CODENAME:-jammy}"
-      # fallback check:
       if ! curl -sI "https://packages.sury.org/php/dists/${SURY_CODENAME}/Release" >/dev/null 2>&1; then
         SURY_CODENAME="jammy"
+        warn "Sury codename fallback -> ${SURY_CODENAME}"
       fi
       printf "deb [signed-by=/usr/share/keyrings/sury-archive-keyring.gpg] https://packages.sury.org/php/ %s main\n" "${SURY_CODENAME}" > /etc/apt/sources.list.d/sury-php.list
       apt-get update -y
-      _install_php_pkgs "${PHP_VER}" || err "PHP install failed (Ubuntu fallback)"
+      _install_php_pkgs "${ver}" || err "PHP ${ver} failed on Ubuntu fallback"
     fi
   fi
 
-  systemctl enable --now "php${PHP_VER}-fpm" || true
-  ok "PHP ${PHP_VER} installed."
+  systemctl enable --now "php${ver}-fpm" >/dev/null 2>&1 || true
+  ok "PHP ${ver} installed and php${ver}-fpm enabled."
+}
 
-  # Install web stack
-  log "Installing nginx, mariadb, redis..."
-  DEBIAN_FRONTEND=noninteractive apt-get install -y nginx mariadb-server mariadb-client redis-server || err "Failed installing webstack"
-  systemctl enable --now mariadb nginx redis-server || true
-  ok "Webstack installed."
+# ---------- Install web stack ----------
+install_webstack() {
+  log "Installing nginx, mariadb-server, redis..."
+  DEBIAN_FRONTEND=noninteractive apt-get install -y nginx mariadb-server redis-server || err "Failed to install web stack"
+  systemctl enable --now nginx mariadb redis-server || true
+  ok "Web stack installed & started."
+}
 
-  # Create DB and user
-  log "Creating database '${DB_NAME}' and user '${DB_USER}'..."
-  mysql -u root <<SQL || err "MySQL step failed. Check root access."
+# ---------- Install Panel ----------
+install_panel() {
+  ask_common_panel
+
+  common_prep
+
+  install_php "${PHP_VER}"
+
+  install_webstack
+
+  log "Creating DB and user '${DB_USER}'..."
+  mysql -u root <<SQL
 DROP DATABASE IF EXISTS \`${DB_NAME}\`;
 CREATE DATABASE \`${DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 DROP USER IF EXISTS '${DB_USER}'@'127.0.0.1';
@@ -189,62 +227,58 @@ CREATE USER '${DB_USER}'@'127.0.0.1' IDENTIFIED BY '${DB_PASS}';
 GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'127.0.0.1';
 FLUSH PRIVILEGES;
 SQL
-  ok "Database & user created."
+  ok "Database and user created."
 
-  # Download panel
-  log "Downloading Pterodactyl Panel..."
+  log "Downloading Pterodactyl panel..."
   mkdir -p /var/www/pterodactyl
   cd /var/www/pterodactyl
-  curl -sL -o panel.tar.gz "https://github.com/pterodactyl/panel/releases/latest/download/panel.tar.gz" || err "Failed to download panel"
+  curl -sL -o panel.tar.gz "https://github.com/pterodactyl/panel/releases/latest/download/panel.tar.gz" || err "Failed to download panel tarball"
   tar -xzf panel.tar.gz
   rm -f panel.tar.gz
-  cp .env.example .env || true
   chmod -R 755 storage bootstrap/cache || true
-  chown -R www-data:www-data /var/www/pterodactyl || true
-  ok "Panel files in /var/www/pterodactyl."
+  cp .env.example .env || true
+  ENVFILE="/var/www/pterodactyl/.env"
 
-  # Update .env
-  log "Writing .env values..."
-  set_env_value "APP_URL" "https://${FQDN}"
-  set_env_value "APP_TIMEZONE" "${TIMEZONE}"
-  set_env_value "APP_ENVIRONMENT_ONLY" "false"
-  set_env_value "DB_CONNECTION" "mysql"
-  set_env_value "DB_HOST" "127.0.0.1"
-  set_env_value "DB_PORT" "3306"
-  set_env_value "DB_DATABASE" "${DB_NAME}"
-  set_env_value "DB_USERNAME" "${DB_USER}"
-  set_env_value "DB_PASSWORD" "${DB_PASS}"
-  set_env_value "CACHE_DRIVER" "redis"
-  set_env_value "SESSION_DRIVER" "redis"
-  set_env_value "QUEUE_CONNECTION" "redis"
-  set_env_value "REDIS_HOST" "127.0.0.1"
-  set_env_value "MAIL_FROM_ADDRESS" "noreply@${FQDN}"
-  set_env_value "MAIL_FROM_NAME" "\"Pterodactyl Panel\""
+  log "Updating .env..."
+  set_env "APP_URL" "https://${FQDN}"
+  set_env "APP_TIMEZONE" "${TIMEZONE}"
+  set_env "APP_ENVIRONMENT_ONLY" "false"
+  set_env "DB_CONNECTION" "mysql"
+  set_env "DB_HOST" "127.0.0.1"
+  set_env "DB_PORT" "3306"
+  set_env "DB_DATABASE" "${DB_NAME}"
+  set_env "DB_USERNAME" "${DB_USER}"
+  set_env "DB_PASSWORD" "${DB_PASS}"
+  set_env "CACHE_DRIVER" "redis"
+  set_env "SESSION_DRIVER" "redis"
+  set_env "QUEUE_CONNECTION" "redis"
+  set_env "REDIS_HOST" "127.0.0.1"
+  set_env "MAIL_FROM_ADDRESS" "noreply@${FQDN}"
+  set_env "MAIL_FROM_NAME" "\"Pterodactyl Panel\""
 
-  # Temporary APP_KEY to avoid composer/artisan complaints
+  # Temporary minimal APP_KEY to avoid composer script errors; will be properly generated after composer
   TMP_APP_KEY="base64:$(openssl rand -base64 32 | tr -d '\n')"
-  set_env_value "APP_KEY" "${TMP_APP_KEY}"
+  set_env "APP_KEY" "${TMP_APP_KEY}"
 
-  ok ".env updated."
+  chown -R www-data:www-data /var/www/pterodactyl || true
+  ok ".env configured."
 
-  # Composer / dependencies
-  log "Installing composer and PHP dependencies..."
+  log "Installing Composer..."
   curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer || err "Composer install failed"
   export COMPOSER_ALLOW_SUPERUSER=1
-  cd /var/www/pterodactyl
-  COMPOSER_MEMORY_LIMIT=-1 composer install --no-dev --prefer-dist --optimize-autoloader --no-interaction || err "Composer failed"
-  ok "Composer deps installed."
 
-  # Artisan tasks
-  log "Running artisan commands (key, cache, migrate & seed)..."
+  cd /var/www/pterodactyl
+  log "Running composer install (non-interactive). This may take several minutes..."
+  COMPOSER_MEMORY_LIMIT=-1 composer install --no-dev --prefer-dist --optimize-autoloader --no-interaction || err "Composer install failed"
+
+  log "Running artisan key:generate, cache clear and migrations..."
   php artisan key:generate --force
   php artisan config:clear || true
   php artisan cache:clear || true
   php artisan migrate --seed --force || err "Migrations failed"
-  ok "Artisan migrations & seeders complete."
 
-  # Create admin user (p:user:make expects --name-first/--name-last)
   log "Creating admin user..."
+  # p:user:make supports --name-first and --name-last as of recent versions
   php artisan p:user:make \
     --email "${ADMIN_EMAIL}" \
     --username "${ADMIN_USER}" \
@@ -252,23 +286,11 @@ SQL
     --name-last "${ADMIN_LAST}" \
     --admin 1 \
     --password "${ADMIN_PASS}" \
-    --no-interaction || warn "Admin creation returned non-zero; check artisan output."
+    --no-interaction || warn "Admin creation may have returned non-zero (check artisan output)."
 
-  ok "Admin creation attempted."
+  ok "Panel installed and admin user attempted."
 
-  # Create certs (always overwrite as requested)
-  log "Generating self-signed certs at /etc/certs (always overwrite)..."
-  mkdir -p /etc/certs
-  openssl req -new -newkey rsa:4096 -days 3650 -nodes -x509 \
-    -subj "/CN=${FQDN}/O=Pterodactyl" \
-    -keyout /etc/certs/privkey.pem \
-    -out /etc/certs/fullchain.pem || warn "OpenSSL exited non-zero"
-  chmod 600 /etc/certs/privkey.pem || true
-  chmod 644 /etc/certs/fullchain.pem || true
-  ok "Self-signed certs created."
-
-  # Nginx config (fastcgi to detected PHP-FPM)
-  log "Detecting PHP-FPM socket..."
+  # detect php-fpm socket for nginx config
   PHP_FPM_SOCK=""
   for s in /run/php/php*-fpm.sock /var/run/php/php*-fpm.sock; do
     if compgen -G "$s" > /dev/null; then
@@ -283,14 +305,31 @@ SQL
       PHP_FPM_SOCK="127.0.0.1:9000"
     fi
   fi
-  ok "Using PHP-FPM socket: ${PHP_FPM_SOCK}"
+  if [[ "$PHP_FPM_SOCK" == /* ]]; then
+    FASTCGI_PASS="unix:${PHP_FPM_SOCK}"
+  else
+    FASTCGI_PASS="${PHP_FPM_SOCK}"
+  fi
 
+  # create certs directory and generate certs (overwrite)
+  mkdir -p /etc/certs/certs
+  log "Generating self-signed certificate at /etc/certs/certs (will overwrite if exists)..."
+  openssl req -new -newkey rsa:4096 -days 3650 -nodes -x509 \
+    -subj "/CN=${FQDN}/O=Pterodactyl" \
+    -keyout /etc/certs/certs/privkey.pem \
+    -out /etc/certs/certs/fullchain.pem || warn "OpenSSL returned non-zero"
+  chmod 644 /etc/certs/certs/fullchain.pem || true
+  chmod 600 /etc/certs/certs/privkey.pem || true
+  ok "Certs generated."
+
+  # Nginx config
   NGINX_CONF="/etc/nginx/sites-available/pterodactyl.conf"
+  log "Writing Nginx config to ${NGINX_CONF} ..."
   cat > "${NGINX_CONF}" <<EOF
 server {
     listen 80;
     server_name ${FQDN};
-    return 301 https://\$host\$request_uri;
+    return 301 https://\$server_name\$request_uri;
 }
 
 server {
@@ -306,8 +345,15 @@ server {
     client_max_body_size 100m;
     sendfile off;
 
-    ssl_certificate /etc/certs/fullchain.pem;
-    ssl_certificate_key /etc/certs/privkey.pem;
+    ssl_certificate /etc/certs/certs/fullchain.pem;
+    ssl_certificate_key /etc/certs/certs/privkey.pem;
+    ssl_session_cache shared:SSL:10m;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers on;
+
+    add_header X-Content-Type-Options nosniff;
+    add_header X-Frame-Options DENY;
+    add_header Referrer-Policy same-origin;
 
     location / {
         try_files \$uri \$uri/ /index.php?\$query_string;
@@ -315,10 +361,11 @@ server {
 
     location ~ \.php\$ {
         fastcgi_split_path_info ^(.+\.php)(/.+)\$;
-        fastcgi_pass unix:${PHP_FPM_SOCK#/run/} # fallback handled below
+        fastcgi_pass ${FASTCGI_PASS};
         fastcgi_index index.php;
         include fastcgi_params;
         fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+        fastcgi_param PHP_VALUE "upload_max_filesize = 100M \n post_max_size=100M";
     }
 
     location ~ /\.ht {
@@ -327,692 +374,199 @@ server {
 }
 EOF
 
-  # If PHP_FPM_SOCK is tcp format, replace fastcgi_pass line correctly
-  if [[ "$PHP_FPM_SOCK" == 127.* ]]; then
-    sed -i "s|fastcgi_pass unix:.*|fastcgi_pass ${PHP_FPM_SOCK};|" "${NGINX_CONF}"
-  else
-    # Ensure unix: prefix
-    sed -i "s|fastcgi_pass unix:.*|fastcgi_pass unix:${PHP_FPM_SOCK};|" "${NGINX_CONF}"
-  fi
-
   rm -f /etc/nginx/sites-enabled/default
   ln -sf "${NGINX_CONF}" /etc/nginx/sites-enabled/pterodactyl.conf
-  nginx -t && systemctl restart nginx || warn "nginx test/restart failed - check logs"
+  nginx -t && systemctl restart nginx || warn "nginx test/restart failed"
 
-  ok "Panel installation finished."
-  echo "Panel: https://${FQDN}"
-  echo "Admin: ${ADMIN_USER} / ${ADMIN_EMAIL} (pw: ${ADMIN_PASS})"
-  echo "DB user: ${DB_USER} pw: ${DB_PASS}"
+  ok "Panel setup complete."
+  echo
+  echo "Panel URL: https://${FQDN}"
+  echo "Admin username: ${ADMIN_USER}"
+  echo "Admin email: ${ADMIN_EMAIL}"
+  echo "Admin password: ${ADMIN_PASS}"
+  echo "DB user: ${DB_USER}"
+  echo "DB password: ${DB_PASS}"
+  echo
+  echo "Cloudflare guidance (if using Cloudflare Tunnel):"
+  echo " - Service Type: HTTPS"
+  echo " - URL (to route to): https://localhost:443"
+  echo " - Additional settings -> TLS: No TLS Verify = ON"
+  echo
 }
 
-# ---------------- Wings Installer ----------------
+# ---------- Install Wings ----------
 install_wings() {
-  log "=== WINGS INSTALLER ==="
+  # Allow to re-use FQDN from Panel if already set, else prompt for basic values
+  if [[ -z "${FQDN:-}" ]]; then
+    read -p "Wings Node FQDN (e.g. node.example.com): " WINGS_FQDN
+  else
+    read -p "Wings Node FQDN (default: ${FQDN}): " WINGS_FQDN
+    WINGS_FQDN=${WINGS_FQDN:-$FQDN}
+  fi
 
-  # Ask interactive for wings config
-  NODE_FQDN="$(ask 'Node FQDN (e.g. node.example.com): ' '')"
-  if [ -z "$NODE_FQDN" ]; then err "Node FQDN required."; fi
+  read -p "Wings Port (http/s endpoint for panel, default 8080): " WINGS_PORT
+  WINGS_PORT=${WINGS_PORT:-8080}
 
-  # Ports (you requested to ask)
-  WINGS_PORT="$(ask 'Enter Wings Port (default 8080): ' '8080')"
-  BIND_PORT="$(ask 'Enter Wings Bind Port (default 2022): ' '2022')"
+  read -p "Wings bind port (daemon bind_port for nodes, default 2022): " WINGS_BIND_PORT
+  WINGS_BIND_PORT=${WINGS_BIND_PORT:-2022}
 
-  # Token values, you requested separate asks
-  NODE_UUID="$(ask 'Enter node UUID: ' '')"
-  TOKEN_ID="$(ask 'Enter token_id: ' '')"
-  TOKEN="$(ask 'Enter token: ' '')"
+  read -p "Node UUID (from Panel): " NODE_UUID
+  read -p "Token ID (from Panel): " TOKEN_ID
+  read -p "Token (from Panel): " TOKEN_SECRET
 
-  log "Wings will be installed for Node ${NODE_FQDN}, port ${WINGS_PORT}, bind ${BIND_PORT}."
+  read -p "Always generate new certs for Wings at /etc/certs? (yes/no) [yes]: " GEN_CERTS
+  GEN_CERTS=${GEN_CERTS:-yes}
 
-  read -p "Press Enter to continue (or Ctrl+C to cancel) ..."
-
-  # Install prerequisites: curl, tar, jq, docker
-  log "Installing prerequisites for Wings..."
+  # install prereqs: docker, curl, tar
+  log "Installing Wings prerequisites (docker, curl)..."
   apt-get update -y
-  apt-get install -y curl wget tar jq ca-certificates || err "Failed prerequisites"
-  # Install Docker (simple route)
+  apt-get install -y curl tar wget jq ca-certificates apt-transport-https gnupg2 lsb-release || true
+
+  # docker install (if missing)
   if ! command -v docker >/dev/null 2>&1; then
-    log "Installing docker.io ..."
-    DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io || warn "docker.io install failed, please install docker manually"
+    log "Installing Docker (official convenience script)..."
+    curl -fsSL https://get.docker.com | bash || warn "Docker install failed — ensure docker is installed"
     systemctl enable --now docker || true
   fi
-  ok "Prerequisites installed."
 
-  # Create /etc/certs and ALWAYS generate new certs (overwrite) as requested
-  log "Creating /etc/certs and generating self-signed certs (overwrite)..."
+  # create certs
   mkdir -p /etc/certs
-  (cd /etc/certs && openssl req -new -newkey rsa:4096 -days 3650 -nodes -x509 \
-    -subj "/CN=${NODE_FQDN}/O=Wings" \
-    -keyout privkey.pem -out fullchain.pem) || warn "OpenSSL returned non-zero"
-  chmod 600 /etc/certs/privkey.pem || true
-  chmod 644 /etc/certs/fullchain.pem || true
-  ok "Certs created at /etc/certs/fullchain.pem & privkey.pem (overwritten)."
-
-  # Create wings directories & user
-  log "Preparing /etc/wings and /var/lib/wings..."
-  mkdir -p /etc/wings
-  mkdir -p /var/lib/wings
-  chown -R root:root /etc/wings
-  ok "Directories ready."
-
-  # Download wings binary (Linux amd64)
-  log "Downloading Wings binary (linux/amd64) to /usr/local/bin/wings ..."
-  WINGS_URL="https://github.com/pterodactyl/wings/releases/latest/download/wings_linux_amd64"
-  if curl -fsSL --head "$WINGS_URL" >/dev/null 2>&1; then
-    curl -fsSL -o /usr/local/bin/wings "$WINGS_URL" || err "Failed to download wings binary"
-    chmod +x /usr/local/bin/wings
-  else
-    warn "Could not fetch wings binary from GitHub. Please download manually to /usr/local/bin/wings."
+  if [[ "$GEN_CERTS" == "yes" || "$GEN_CERTS" == "y" ]]; then
+    log "Generating/overwriting certs at /etc/certs/fullchain.pem and /etc/certs/privkey.pem ..."
+    (cd /etc/certs && openssl req -new -newkey rsa:4096 -days 3650 -nodes -x509 \
+      -subj "/CN=${WINGS_FQDN}/O=Pterodactyl-Wings" \
+      -keyout privkey.pem -out fullchain.pem) || warn "openssl returned non-zero"
+    chmod 600 /etc/certs/privkey.pem || true
+    chmod 644 /etc/certs/fullchain.pem || true
   fi
-  ok "Wings binary in place (if download succeeded)."
 
-  # Build config.yml for wings (basic, using provided values)
-  WINGS_CONFIG="/etc/wings/config.yml"
-  log "Writing Wings config to ${WINGS_CONFIG} ..."
-  cat > "${WINGS_CONFIG}" <<WCFG
-debug: false
-system:
-  data: /var/lib/wings
-api:
-  host: 0.0.0.0
-  port: ${WINGS_PORT}
-  ssl:
-    enabled: true
-    cert: /etc/certs/fullchain.pem
-    key: /etc/certs/privkey.pem
-  upload_limit: 100
-  token: "${TOKEN}"
-  token_id: "${TOKEN_ID}"
-  uuid: "${NODE_UUID}"
-  # Note: The Pterodactyl Panel must point to this node: https://${NODE_FQDN}:${WINGS_PORT}
-websocket:
-  host: 0.0.0.0
-  port: ${BIND_PORT}
-  ssl:
-    enabled: true
-    cert: /etc/certs/fullchain.pem
-    key: /etc/certs/privkey.pem
-metrics:
+  # create wings config directory
+  mkdir -p /etc/pterodactyl
+  WINGS_CFG="/etc/pterodactyl/config.yml"
+
+  log "Writing Wings config to ${WINGS_CFG} ..."
+  cat > "${WINGS_CFG}" <<YML
+# Pterodactyl Wings configuration autogenerated by installer
+uuid: "${NODE_UUID}"
+token_id: "${TOKEN_ID}"
+token: "${TOKEN_SECRET}"
+
+[web]
+  listen: "0.0.0.0:${WINGS_PORT}"
+  host: "${WINGS_FQDN}"
+
+[remote]
+  # listening port for remote server connections
+  bind: "0.0.0.0:${WINGS_BIND_PORT}"
+
+[ssl]
   enabled: true
-  driver: prometheus
-  port: 8081
-  path: /metrics
-WCFG
+  # path to fullchain and private key
+  cert: /etc/certs/fullchain.pem
+  key: /etc/certs/privkey.pem
 
-  chmod 640 "${WINGS_CONFIG}" || true
-  ok "Wings config written."
+[system]
+  data: /var/lib/pterodactyl/volumes
+  # path for wings to store data, logs, etc
+  log: /var/log/wings.log
+YML
 
-  # Create systemd service for wings
-  log "Creating systemd service /etc/systemd/system/wings.service ..."
-  cat > /etc/systemd/system/wings.service <<EOS
+  chown -R root:root /etc/pterodactyl
+  chmod 600 "${WINGS_CFG}" || true
+
+  # download wings binary
+  log "Downloading Wings binary (latest)..."
+  WINGS_BIN="/usr/local/bin/wings"
+  curl -fsSL -o "${WINGS_BIN}" "https://github.com/pterodactyl/wings/releases/latest/download/wings_linux_amd64" || err "Failed to download wings binary"
+  chmod +x "${WINGS_BIN}" || true
+  ok "Wings binary installed at ${WINGS_BIN}"
+
+  # create systemd service
+  cat > /etc/systemd/system/wings.service <<'SERVICE'
 [Unit]
 Description=Pterodactyl Wings
-After=network.target docker.service
-Wants=docker.service
+After=docker.service
+Requires=docker.service
 
 [Service]
 User=root
 Group=root
-WorkingDirectory=/etc/wings
-ExecStart=/usr/local/bin/wings --config /etc/wings/config.yml
+WorkingDirectory=/etc/pterodactyl
+ExecStart=/usr/local/bin/wings --config /etc/pterodactyl/config.yml
 Restart=on-failure
+StartLimitInterval=600
+StartLimitBurst=5
 LimitNOFILE=65536
 
 [Install]
 WantedBy=multi-user.target
-EOS
+SERVICE
 
   systemctl daemon-reload
-  systemctl enable --now wings || warn "Failed to start wings service (check journalctl -u wings)"
-  ok "Wings service installed and attempted to start."
+  systemctl enable --now wings.service || warn "Failed to enable/start wings.service automatically"
+  ok "Wings service enabled and started (check 'systemctl status wings')."
 
   echo
-  ok "Wings installation completed."
-  echo "Node: ${NODE_FQDN}"
-  echo "Wings API Port: ${WINGS_PORT}"
-  echo "Websocket Bind Port: ${BIND_PORT}"
-  echo "Config: ${WINGS_CONFIG}"
+  echo "Wings setup summary:"
+  echo " - Node FQDN: ${WINGS_FQDN}"
+  echo " - Panel will talk to Wings at: https://${WINGS_FQDN}:${WINGS_PORT} (if behind Cloudflare, use tunnel)"
+  echo " - Wings systemd service: wings.service"
+  echo " - Wings config: ${WINGS_CFG}"
+  echo " - Certs: /etc/certs/fullchain.pem (cert), /etc/certs/privkey.pem (key)"
+  echo
 }
 
-# ---------------- System info ----------------
-system_info() {
-  echo "=== SYSTEM INFO ==="
-  uname -a
-  lsb_release -a 2>/dev/null || true
-  echo
-  echo "Disk:"
-  df -h
-  echo
-  echo "Memory:"
-  free -h
-  echo
-  echo "Docker:"
-  docker --version 2>/dev/null || echo "docker not installed"
-  echo
-  read -p "Press Enter to return to menu..."
-}
-
-# ---------------- Main loop ----------------
-while true; do
-  CHOICE=$(show_menu)
-  case "$CHOICE" in
-    1) install_panel; break ;;
-    2) install_wings; break ;;
-    3) install_panel; install_wings; break ;;
-    4) system_info ;;
-    5) echo "Exiting."; exit 0 ;;
-    *) echo "Invalid option."; ;;
-  esac
-done
-
-echo
-ok "Installer finished. Review output and logs (/var/log/syslog, journalctl -u wings, /var/www/pterodactyl/storage/logs/)."
-#!/bin/bash
-# Pterodactyl Full Auto-Installer (Panel + Wings)
-# Supports Debian 11/12 and Ubuntu 20.04/22.04/24.04
-# Interactive menu: Panel / Wings / Panel+Wings / System info / Exit
-# WARNING: This script performs system installs (apt, composer, nginx, mariadb, redis, systemd services).
-set -euo pipefail
-IFS=$'\n\t'
-
-# ---------------- Colors & helpers ----------------
-RED='\033[1;31m'; GREEN='\033[1;32m'; YELLOW='\033[1;33m'; BLUE='\033[1;34m'; NC='\033[0m'
-log(){ echo -e "${BLUE}[INFO]${NC} $1"; }
-ok(){ echo -e "${GREEN}[OK]${NC} $1"; }
-warn(){ echo -e "${YELLOW}[WARN]${NC} $1"; }
-err(){ echo -e "${RED}[ERROR]${NC} $1" >&2; exit 1; }
-
-if [ "$EUID" -ne 0 ]; then
-  err "Run this script as root (sudo)."
-fi
-
-# ---------------- Detect OS ----------------
-if [ -f /etc/os-release ]; then
-  . /etc/os-release
-  OS_ID="$ID"
-  OS_NAME="$NAME"
-  OS_VER="$VERSION_ID"
-  CODENAME="$(lsb_release -sc 2>/dev/null || true)"
-else
-  err "/etc/os-release not found, cannot detect OS."
-fi
-log "Detected OS: $OS_NAME $OS_VER (codename: ${CODENAME:-unknown})"
-
-# ---------------- Utility functions ----------------
-ask() {
-  local prompt="$1" default="$2" var
-  read -p "$prompt" var
-  if [ -z "$var" ]; then
-    echo "$default"
-  else
-    echo "$var"
-  fi
-}
-
-set_env_value() {
-  # args: key value (writes to .env in current dir)
-  local key="$1" value="$2"
-  if grep -qE "^${key}=" .env 2>/dev/null; then
-    sed -i "s|^${key}=.*|${key}=${value}|" .env
-  else
-    echo "${key}=${value}" >> .env
-  fi
-}
-
-# ---------------- Menu ----------------
-show_menu() {
-  cat <<'MENU'
-
-============================================
-      Pterodactyl Full Auto-Installer
-============================================
-1) Install Panel (Pterodactyl)
-2) Install Wings (node)
-3) Install Panel + Wings
-4) System info
-5) Exit
-MENU
-  read -p "Choose an option [1-5]: " MENU_CHOICE
-  echo "$MENU_CHOICE"
-}
-
-# ---------------- Common cleanup for ondrej issues ----------------
-cleanup_ondrej() {
-  log "Cleaning any broken/old ondrej PPA files..."
-  shopt -s nullglob
-  for f in /etc/apt/sources.list.d/*ondrej* /etc/apt/sources.list.d/*ubuntu-php*; do
-    [ -f "$f" ] && rm -f "$f"
-  done
-  for s in /etc/apt/sources.list.d/*.sources; do
-    if grep -qi "ondrej" "$s" 2>/dev/null; then rm -f "$s"; fi
-  done
-  sed -i '/ondrej\/php/d' /etc/apt/sources.list 2>/dev/null || true
-  apt-get update -y >/dev/null 2>&1 || true
-  ok "Ondrej residues removed."
-}
-
-# ---------------- Panel Installer ----------------
-install_panel() {
-  log "=== PANEL INSTALLER ==="
-
-  # Ask interactive questions
-  FQDN="$(ask 'Panel Domain (FQDN, e.g. panel.example.com): ' '')"
-  if [ -z "$FQDN" ]; then err "FQDN required."; fi
-
-  ADMIN_EMAIL="$(ask "Admin Email [admin@$FQDN]: " "admin@$FQDN")"
-  ADMIN_USER="$(ask "Admin Username [admin]: " "admin")"
-  read -s -p "Admin Password (leave blank to auto-generate): " ADMIN_PASS
-  echo
-  if [ -z "$ADMIN_PASS" ]; then
-    ADMIN_PASS="$(openssl rand -base64 18)"
-    warn "Random admin password generated: $ADMIN_PASS"
-  fi
-  ADMIN_FIRST="$(ask "Admin First Name [Admin]: " "Admin")"
-  ADMIN_LAST="$(ask "Admin Last Name [User]: " "User")"
-
-  echo
-  echo "Choose PHP version:"
-  echo " 1) 8.1"
-  echo " 2) 8.2 (recommended)"
-  echo " 3) 8.3"
-  PHP_CHOICE="$(ask "Select (1/2/3) [2]: " "2")"
-  case "$PHP_CHOICE" in
-    1) PHP_VER="8.1";;
-    2) PHP_VER="8.2";;
-    3) PHP_VER="8.3";;
-    *) PHP_VER="8.2";;
-  esac
-
-  TIMEZONE="Asia/Kolkata"
-  DB_NAME="pterodactyl"
-  DB_USER="pterodactyl"
-  DB_PASS="$(openssl rand -hex 16)"  # safe for SQL
-
-  log "Panel will be installed for ${FQDN}. PHP ${PHP_VER}. DB user ${DB_USER}."
-
-  read -p "Press Enter to continue (or Ctrl+C to cancel) ..."
-
-  # Clean ondrej files that cause errors
-  cleanup_ondrej
-
-  # Install prerequisites
-  log "Installing prerequisites..."
-  apt-get update -y
-  apt-get install -y ca-certificates curl wget lsb-release gnupg2 software-properties-common unzip git tar build-essential openssl apt-transport-https || err "Failed installing prerequisites"
-  ok "Prerequisites installed."
-
-  # Install PHP via Sury (Debian) or Ondrej/Sury fallback (Ubuntu)
-  log "Installing PHP ${PHP_VER}..."
-  _install_php_pkgs() {
-    apt-get install -y "php${1}" "php${1}-fpm" "php${1}-cli" "php${1}-mbstring" "php${1}-xml" "php${1}-curl" "php${1}-zip" "php${1}-gd" "php${1}-bcmath" "php${1}-mysql" || return 1
-    return 0
-  }
-
-  if [[ "$OS_ID" == "debian" ]]; then
-    curl -fsSL https://packages.sury.org/php/apt.gpg | gpg --dearmor -o /usr/share/keyrings/sury-archive-keyring.gpg
-    SURY_CODENAME="${CODENAME:-bullseye}"
-    printf "deb [signed-by=/usr/share/keyrings/sury-archive-keyring.gpg] https://packages.sury.org/php/ %s main\n" "${SURY_CODENAME}" > /etc/apt/sources.list.d/sury-php.list
-    apt-get update -y
-    _install_php_pkgs "${PHP_VER}" || err "PHP install failed (Debian)"
-  else
-    # Try Ondrej PPA for supported codenames else fallback to Sury
-    SUPPORTED_UBUNTU_CODENAMES=("bionic" "focal" "jammy" "noble")
-    if printf '%s\n' "${SUPPORTED_UBUNTU_CODENAMES[@]}" | grep -qx "${CODENAME:-}"; then
-      add-apt-repository -y ppa:ondrej/php || warn "add-apt-repository failed (continuing to fallback)"
-      apt-get update -y || true
-      if apt-cache policy | grep -q "ppa.launchpadcontent.net/ondrej/php"; then
-        if ! _install_php_pkgs "${PHP_VER}"; then
-          warn "Ondrej install failed — falling back to Sury"
-        fi
-      fi
-    fi
-    if ! command -v php >/dev/null 2>&1; then
-      curl -fsSL https://packages.sury.org/php/apt.gpg | gpg --dearmor -o /usr/share/keyrings/sury-archive-keyring.gpg
-      SURY_CODENAME="${CODENAME:-jammy}"
-      # fallback check:
-      if ! curl -sI "https://packages.sury.org/php/dists/${SURY_CODENAME}/Release" >/dev/null 2>&1; then
-        SURY_CODENAME="jammy"
-      fi
-      printf "deb [signed-by=/usr/share/keyrings/sury-archive-keyring.gpg] https://packages.sury.org/php/ %s main\n" "${SURY_CODENAME}" > /etc/apt/sources.list.d/sury-php.list
-      apt-get update -y
-      _install_php_pkgs "${PHP_VER}" || err "PHP install failed (Ubuntu fallback)"
-    fi
-  fi
-
-  systemctl enable --now "php${PHP_VER}-fpm" || true
-  ok "PHP ${PHP_VER} installed."
-
-  # Install web stack
-  log "Installing nginx, mariadb, redis..."
-  DEBIAN_FRONTEND=noninteractive apt-get install -y nginx mariadb-server mariadb-client redis-server || err "Failed installing webstack"
-  systemctl enable --now mariadb nginx redis-server || true
-  ok "Webstack installed."
-
-  # Create DB and user
-  log "Creating database '${DB_NAME}' and user '${DB_USER}'..."
-  mysql -u root <<SQL || err "MySQL step failed. Check root access."
-DROP DATABASE IF EXISTS \`${DB_NAME}\`;
-CREATE DATABASE \`${DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-DROP USER IF EXISTS '${DB_USER}'@'127.0.0.1';
-CREATE USER '${DB_USER}'@'127.0.0.1' IDENTIFIED BY '${DB_PASS}';
-GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'127.0.0.1';
-FLUSH PRIVILEGES;
-SQL
-  ok "Database & user created."
-
-  # Download panel
-  log "Downloading Pterodactyl Panel..."
-  mkdir -p /var/www/pterodactyl
-  cd /var/www/pterodactyl
-  curl -sL -o panel.tar.gz "https://github.com/pterodactyl/panel/releases/latest/download/panel.tar.gz" || err "Failed to download panel"
-  tar -xzf panel.tar.gz
-  rm -f panel.tar.gz
-  cp .env.example .env || true
-  chmod -R 755 storage bootstrap/cache || true
-  chown -R www-data:www-data /var/www/pterodactyl || true
-  ok "Panel files in /var/www/pterodactyl."
-
-  # Update .env
-  log "Writing .env values..."
-  set_env_value "APP_URL" "https://${FQDN}"
-  set_env_value "APP_TIMEZONE" "${TIMEZONE}"
-  set_env_value "APP_ENVIRONMENT_ONLY" "false"
-  set_env_value "DB_CONNECTION" "mysql"
-  set_env_value "DB_HOST" "127.0.0.1"
-  set_env_value "DB_PORT" "3306"
-  set_env_value "DB_DATABASE" "${DB_NAME}"
-  set_env_value "DB_USERNAME" "${DB_USER}"
-  set_env_value "DB_PASSWORD" "${DB_PASS}"
-  set_env_value "CACHE_DRIVER" "redis"
-  set_env_value "SESSION_DRIVER" "redis"
-  set_env_value "QUEUE_CONNECTION" "redis"
-  set_env_value "REDIS_HOST" "127.0.0.1"
-  set_env_value "MAIL_FROM_ADDRESS" "noreply@${FQDN}"
-  set_env_value "MAIL_FROM_NAME" "\"Pterodactyl Panel\""
-
-  # Temporary APP_KEY to avoid composer/artisan complaints
-  TMP_APP_KEY="base64:$(openssl rand -base64 32 | tr -d '\n')"
-  set_env_value "APP_KEY" "${TMP_APP_KEY}"
-
-  ok ".env updated."
-
-  # Composer / dependencies
-  log "Installing composer and PHP dependencies..."
-  curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer || err "Composer install failed"
-  export COMPOSER_ALLOW_SUPERUSER=1
-  cd /var/www/pterodactyl
-  COMPOSER_MEMORY_LIMIT=-1 composer install --no-dev --prefer-dist --optimize-autoloader --no-interaction || err "Composer failed"
-  ok "Composer deps installed."
-
-  # Artisan tasks
-  log "Running artisan commands (key, cache, migrate & seed)..."
-  php artisan key:generate --force
-  php artisan config:clear || true
-  php artisan cache:clear || true
-  php artisan migrate --seed --force || err "Migrations failed"
-  ok "Artisan migrations & seeders complete."
-
-  # Create admin user (p:user:make expects --name-first/--name-last)
-  log "Creating admin user..."
-  php artisan p:user:make \
-    --email "${ADMIN_EMAIL}" \
-    --username "${ADMIN_USER}" \
-    --name-first "${ADMIN_FIRST}" \
-    --name-last "${ADMIN_LAST}" \
-    --admin 1 \
-    --password "${ADMIN_PASS}" \
-    --no-interaction || warn "Admin creation returned non-zero; check artisan output."
-
-  ok "Admin creation attempted."
-
-  # Create certs (always overwrite as requested)
-  log "Generating self-signed certs at /etc/certs (always overwrite)..."
-  mkdir -p /etc/certs
-  openssl req -new -newkey rsa:4096 -days 3650 -nodes -x509 \
-    -subj "/CN=${FQDN}/O=Pterodactyl" \
-    -keyout /etc/certs/privkey.pem \
-    -out /etc/certs/fullchain.pem || warn "OpenSSL exited non-zero"
-  chmod 600 /etc/certs/privkey.pem || true
-  chmod 644 /etc/certs/fullchain.pem || true
-  ok "Self-signed certs created."
-
-  # Nginx config (fastcgi to detected PHP-FPM)
-  log "Detecting PHP-FPM socket..."
-  PHP_FPM_SOCK=""
-  for s in /run/php/php*-fpm.sock /var/run/php/php*-fpm.sock; do
-    if compgen -G "$s" > /dev/null; then
-      PHP_FPM_SOCK="$(compgen -G "$s" | head -n1)"
-      break
-    fi
-  done
-  if [[ -z "$PHP_FPM_SOCK" ]]; then
-    if systemctl is-active --quiet "php${PHP_VER}-fpm" 2>/dev/null; then
-      PHP_FPM_SOCK="/run/php/php${PHP_VER}-fpm.sock"
+# ---------- Main: route menu choices ----------
+case "${MENU_CHOICE}" in
+  1)
+    install_panel
+    ;;
+  2)
+    install_wings
+    ;;
+  3)
+    install_panel
+    echo
+    read -p "Proceed to install and configure Wings on this host? (y/N): " PROCEED_W
+    PROCEED_W=${PROCEED_W:-N}
+    if [[ "${PROCEED_W,,}" == "y" || "${PROCEED_W,,}" == "yes" ]]; then
+      install_wings
     else
-      PHP_FPM_SOCK="127.0.0.1:9000"
+      log "Skipping Wings installation as requested."
+      echo "If you want to install Wings later, re-run and choose option 2."
     fi
-  fi
-  ok "Using PHP-FPM socket: ${PHP_FPM_SOCK}"
+    ;;
+  4)
+    sys_info
+    ;;
+  5)
+    echo "Bye."
+    exit 0
+    ;;
+  *)
+    warn "Unknown option, performing full install (panel + wings)."
+    install_panel
+    install_wings
+    ;;
+esac
 
-  NGINX_CONF="/etc/nginx/sites-available/pterodactyl.conf"
-  cat > "${NGINX_CONF}" <<EOF
-server {
-    listen 80;
-    server_name ${FQDN};
-    return 301 https://\$host\$request_uri;
-}
-
-server {
-    listen 443 ssl http2;
-    server_name ${FQDN};
-
-    root /var/www/pterodactyl/public;
-    index index.php;
-
-    access_log /var/log/nginx/pterodactyl.app-access.log;
-    error_log  /var/log/nginx/pterodactyl.app-error.log error;
-
-    client_max_body_size 100m;
-    sendfile off;
-
-    ssl_certificate /etc/certs/fullchain.pem;
-    ssl_certificate_key /etc/certs/privkey.pem;
-
-    location / {
-        try_files \$uri \$uri/ /index.php?\$query_string;
-    }
-
-    location ~ \.php\$ {
-        fastcgi_split_path_info ^(.+\.php)(/.+)\$;
-        fastcgi_pass unix:${PHP_FPM_SOCK#/run/} # fallback handled below
-        fastcgi_index index.php;
-        include fastcgi_params;
-        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
-    }
-
-    location ~ /\.ht {
-        deny all;
-    }
-}
-EOF
-
-  # If PHP_FPM_SOCK is tcp format, replace fastcgi_pass line correctly
-  if [[ "$PHP_FPM_SOCK" == 127.* ]]; then
-    sed -i "s|fastcgi_pass unix:.*|fastcgi_pass ${PHP_FPM_SOCK};|" "${NGINX_CONF}"
-  else
-    # Ensure unix: prefix
-    sed -i "s|fastcgi_pass unix:.*|fastcgi_pass unix:${PHP_FPM_SOCK};|" "${NGINX_CONF}"
-  fi
-
-  rm -f /etc/nginx/sites-enabled/default
-  ln -sf "${NGINX_CONF}" /etc/nginx/sites-enabled/pterodactyl.conf
-  nginx -t && systemctl restart nginx || warn "nginx test/restart failed - check logs"
-
-  ok "Panel installation finished."
-  echo "Panel: https://${FQDN}"
-  echo "Admin: ${ADMIN_USER} / ${ADMIN_EMAIL} (pw: ${ADMIN_PASS})"
-  echo "DB user: ${DB_USER} pw: ${DB_PASS}"
-}
-
-# ---------------- Wings Installer ----------------
-install_wings() {
-  log "=== WINGS INSTALLER ==="
-
-  # Ask interactive for wings config
-  NODE_FQDN="$(ask 'Node FQDN (e.g. node.example.com): ' '')"
-  if [ -z "$NODE_FQDN" ]; then err "Node FQDN required."; fi
-
-  # Ports (you requested to ask)
-  WINGS_PORT="$(ask 'Enter Wings Port (default 8080): ' '8080')"
-  BIND_PORT="$(ask 'Enter Wings Bind Port (default 2022): ' '2022')"
-
-  # Token values, you requested separate asks
-  NODE_UUID="$(ask 'Enter node UUID: ' '')"
-  TOKEN_ID="$(ask 'Enter token_id: ' '')"
-  TOKEN="$(ask 'Enter token: ' '')"
-
-  log "Wings will be installed for Node ${NODE_FQDN}, port ${WINGS_PORT}, bind ${BIND_PORT}."
-
-  read -p "Press Enter to continue (or Ctrl+C to cancel) ..."
-
-  # Install prerequisites: curl, tar, jq, docker
-  log "Installing prerequisites for Wings..."
-  apt-get update -y
-  apt-get install -y curl wget tar jq ca-certificates || err "Failed prerequisites"
-  # Install Docker (simple route)
-  if ! command -v docker >/dev/null 2>&1; then
-    log "Installing docker.io ..."
-    DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io || warn "docker.io install failed, please install docker manually"
-    systemctl enable --now docker || true
-  fi
-  ok "Prerequisites installed."
-
-  # Create /etc/certs and ALWAYS generate new certs (overwrite) as requested
-  log "Creating /etc/certs and generating self-signed certs (overwrite)..."
-  mkdir -p /etc/certs
-  (cd /etc/certs && openssl req -new -newkey rsa:4096 -days 3650 -nodes -x509 \
-    -subj "/CN=${NODE_FQDN}/O=Wings" \
-    -keyout privkey.pem -out fullchain.pem) || warn "OpenSSL returned non-zero"
-  chmod 600 /etc/certs/privkey.pem || true
-  chmod 644 /etc/certs/fullchain.pem || true
-  ok "Certs created at /etc/certs/fullchain.pem & privkey.pem (overwritten)."
-
-  # Create wings directories & user
-  log "Preparing /etc/wings and /var/lib/wings..."
-  mkdir -p /etc/wings
-  mkdir -p /var/lib/wings
-  chown -R root:root /etc/wings
-  ok "Directories ready."
-
-  # Download wings binary (Linux amd64)
-  log "Downloading Wings binary (linux/amd64) to /usr/local/bin/wings ..."
-  WINGS_URL="https://github.com/pterodactyl/wings/releases/latest/download/wings_linux_amd64"
-  if curl -fsSL --head "$WINGS_URL" >/dev/null 2>&1; then
-    curl -fsSL -o /usr/local/bin/wings "$WINGS_URL" || err "Failed to download wings binary"
-    chmod +x /usr/local/bin/wings
-  else
-    warn "Could not fetch wings binary from GitHub. Please download manually to /usr/local/bin/wings."
-  fi
-  ok "Wings binary in place (if download succeeded)."
-
-  # Build config.yml for wings (basic, using provided values)
-  WINGS_CONFIG="/etc/wings/config.yml"
-  log "Writing Wings config to ${WINGS_CONFIG} ..."
-  cat > "${WINGS_CONFIG}" <<WCFG
-debug: false
-system:
-  data: /var/lib/wings
-api:
-  host: 0.0.0.0
-  port: ${WINGS_PORT}
-  ssl:
-    enabled: true
-    cert: /etc/certs/fullchain.pem
-    key: /etc/certs/privkey.pem
-  upload_limit: 100
-  token: "${TOKEN}"
-  token_id: "${TOKEN_ID}"
-  uuid: "${NODE_UUID}"
-  # Note: The Pterodactyl Panel must point to this node: https://${NODE_FQDN}:${WINGS_PORT}
-websocket:
-  host: 0.0.0.0
-  port: ${BIND_PORT}
-  ssl:
-    enabled: true
-    cert: /etc/certs/fullchain.pem
-    key: /etc/certs/privkey.pem
-metrics:
-  enabled: true
-  driver: prometheus
-  port: 8081
-  path: /metrics
-WCFG
-
-  chmod 640 "${WINGS_CONFIG}" || true
-  ok "Wings config written."
-
-  # Create systemd service for wings
-  log "Creating systemd service /etc/systemd/system/wings.service ..."
-  cat > /etc/systemd/system/wings.service <<EOS
-[Unit]
-Description=Pterodactyl Wings
-After=network.target docker.service
-Wants=docker.service
-
-[Service]
-User=root
-Group=root
-WorkingDirectory=/etc/wings
-ExecStart=/usr/local/bin/wings --config /etc/wings/config.yml
-Restart=on-failure
-LimitNOFILE=65536
-
-[Install]
-WantedBy=multi-user.target
-EOS
-
-  systemctl daemon-reload
-  systemctl enable --now wings || warn "Failed to start wings service (check journalctl -u wings)"
-  ok "Wings service installed and attempted to start."
-
-  echo
-  ok "Wings installation completed."
-  echo "Node: ${NODE_FQDN}"
-  echo "Wings API Port: ${WINGS_PORT}"
-  echo "Websocket Bind Port: ${BIND_PORT}"
-  echo "Config: ${WINGS_CONFIG}"
-}
-
-# ---------------- System info ----------------
-system_info() {
-  echo "=== SYSTEM INFO ==="
-  uname -a
-  lsb_release -a 2>/dev/null || true
-  echo
-  echo "Disk:"
-  df -h
-  echo
-  echo "Memory:"
-  free -h
-  echo
-  echo "Docker:"
-  docker --version 2>/dev/null || echo "docker not installed"
-  echo
-  read -p "Press Enter to return to menu..."
-}
-
-# ---------------- Main loop ----------------
-while true; do
-  CHOICE=$(show_menu)
-  case "$CHOICE" in
-    1) install_panel; break ;;
-    2) install_wings; break ;;
-    3) install_panel; install_wings; break ;;
-    4) system_info ;;
-    5) echo "Exiting."; exit 0 ;;
-    *) echo "Invalid option."; ;;
-  esac
-done
-
+# ---------- final instructions ----------
 echo
-ok "Installer finished. Review output and logs (/var/log/syslog, journalctl -u wings, /var/www/pterodactyl/storage/logs/)."
+ok "ALL DONE. Useful commands:"
+echo " - Check Panel logs: tail -f /var/www/pterodactyl/storage/logs/laravel-$(date +%F).log"
+echo " - Check Wings logs: journalctl -u wings -f"
+echo " - Nginx logs: /var/log/nginx/pterodactyl.app-error.log"
+echo
+echo -e "${YELLOW}If you're using Cloudflare (proxy/Tunnel):${NC}"
+echo " - Create Cloudflare Tunnel or Route to forward your subdomain to https://localhost:443"
+echo " - In Cloudflare published app: Service Type = HTTPS, URL = https://localhost:443"
+echo " - Additional application settings -> TLS: set 'No TLS Verify' ON"
+echo
+echo "Panel URL: https://${FQDN}"
+echo "Admin username: ${ADMIN_USER}"
+echo "Admin email: ${ADMIN_EMAIL}"
+echo "Admin password: ${ADMIN_PASS}"
+echo "DB user: ${DB_USER}"
+echo "DB pass: ${DB_PASS}"
+echo
+ok "Script finished. Please check logs and the running services."
