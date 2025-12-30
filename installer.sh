@@ -1,6 +1,6 @@
 #!/bin/bash
-# COMPLETE Pterodactyl Installer + Panel Image Changer (Fixed 100% with artisan down/up + chown/nginx/cache clear)
-# Debian 11 Bullseye - December 30, 2025
+# COMPLETE Pterodactyl Installer - Fixed with BFQ & cgroup v1 GRUB (Dec 30, 2025)
+# Debian 11 Bullseye Compatible - Auto arch + real config format
 set -euo pipefail
 IFS=$'\n\t'
 
@@ -10,16 +10,17 @@ ok()   { echo -e "${GREEN}[OK]${NC} $1"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 err()  { echo -e "${RED}[ERROR]${NC} $1" >&2; exit 1; }
 
-[[ $EUID -ne 0 ]] && err "Run this script as root (sudo)."
+[[ $EUID -ne 0 ]] && err "Run as root (sudo)."
 
 clear
-echo -e "${GREEN}Pterodactyl Complete Installer + Image Changer${NC}"
+echo -e "${GREEN}Pterodactyl Complete Installer - BFQ & cgroup v1 Fixed${NC}"
 echo "Date: December 30, 2025"
 
-# Detect OS
+# Detect OS & architecture
 . /etc/os-release 2>/dev/null || err "Cannot detect OS"
 CODENAME="${VERSION_CODENAME:-$(lsb_release -sc 2>/dev/null || echo bullseye)}"
-log "Detected: $NAME $VERSION_ID (codename: $CODENAME)"
+ARCH=$(uname -m)
+log "Detected: $NAME $VERSION_ID | Arch: $ARCH"
 
 PTERO_DIR="/var/www/pterodactyl"
 
@@ -28,9 +29,9 @@ menu() {
 ${GREEN}Select Option:${NC}
 
  1) Install Pterodactyl Panel (port 8080 + HTTPS + Queue Worker)
- 2) Install Wings (Node)
- 3) Install Blueprint (theme/framework)
- 4) Install Cloudflare Tunnel (cloudflared)
+ 2) Install Wings (auto arch + BFQ + cgroup v1 GRUB fix)
+ 3) Install Blueprint
+ 4) Install Cloudflare Tunnel
  5) System Info
  6) Panel Image Changer (favicons + SVGs)
  7) Exit
@@ -52,7 +53,7 @@ system_info() {
     echo -e "\n${GREEN}System Information${NC}"
     echo "OS: $PRETTY_NAME"
     echo "Kernel: $(uname -r)"
-    echo "CPU: $(lscpu | grep 'Model name:' | cut -d: -f2 | xargs)"
+    echo "CPU Arch: $(uname -m)"
     df -h /
     echo
     read -p "Press Enter..." dummy
@@ -61,10 +62,10 @@ system_info() {
 
 install_panel() {
     clear
-    echo -e "${GREEN}→ Install Pterodactyl Panel (port 8080 + HTTPS + Queue Worker)${NC}\n"
+    echo -e "${GREEN}→ Install Pterodactyl Panel${NC}\n"
 
     read -p "Panel FQDN (e.g. panel.example.com): " FQDN
-    [[ -z "$FQDN" ]] && err "FQDN is required!"
+    [[ -z "$FQDN" ]] && err "FQDN required!"
 
     read -p "Admin Email [admin@$FQDN]: " ADMIN_EMAIL
     ADMIN_EMAIL=${ADMIN_EMAIL:-"admin@$FQDN"}
@@ -74,7 +75,7 @@ install_panel() {
 
     read -s -p "Admin Password (blank = random): " ADMIN_PASS
     echo
-    [[ -z "$ADMIN_PASS" ]] && ADMIN_PASS="$(openssl rand -base64 12)" && warn "Generated password: $ADMIN_PASS"
+    [[ -z "$ADMIN_PASS" ]] && ADMIN_PASS="$(openssl rand -base64 12)" && warn "Generated: $ADMIN_PASS"
 
     read -p "Admin First Name [Admin]: " ADMIN_FIRST; ADMIN_FIRST=${ADMIN_FIRST:-Admin}
     read -p "Admin Last Name [User]: " ADMIN_LAST;   ADMIN_LAST=${ADMIN_LAST:-User}
@@ -91,7 +92,6 @@ install_panel() {
     apt install -y ca-certificates curl wget tar unzip git gnupg lsb-release apt-transport-https \
         nginx mariadb-server redis-server
 
-    # PHP - Sury repo
     log "Adding Sury PHP repository..."
     curl -sSLo /usr/share/keyrings/deb.sury.org-php.gpg https://packages.sury.org/php/apt.gpg
     echo "deb [signed-by=/usr/share/keyrings/deb.sury.org-php.gpg] https://packages.sury.org/php/ bullseye main" > /etc/apt/sources.list.d/php-sury.list
@@ -115,7 +115,7 @@ GRANT ALL PRIVILEGES ON pterodactyl.* TO 'pterodactyl'@'127.0.0.1';
 FLUSH PRIVILEGES;
 SQL
 
-    # Panel download & config
+    # Panel
     mkdir -p "$PTERO_DIR" && cd "$PTERO_DIR"
     curl -Lo panel.tar.gz https://github.com/pterodactyl/panel/releases/latest/download/panel.tar.gz
     tar -xzf panel.tar.gz && rm panel.tar.gz
@@ -211,17 +211,22 @@ EOF
 
 install_wings() {
     clear
-    echo -e "${GREEN}→ Install Wings${NC}\n"
+    echo -e "${GREEN}→ Install Wings (Auto Arch + BFQ + cgroup v1 GRUB fix)${NC}\n"
 
-    read -p "Panel URL[](https://...): " PANEL_URL
-    [[ ! $PANEL_URL =~ ^https:// ]] && err "Must start with https://"
+    # Auto-detect architecture
+    ARCH=$(uname -m)
+    case $ARCH in
+        x86_64) WINGS_FILE="wings_linux_amd64" ;;
+        aarch64|arm64) WINGS_FILE="wings_linux_arm64" ;;
+        armv7l) WINGS_FILE="wings_linux_armv7" ;;
+        *) err "Unsupported architecture: $ARCH. Manual download required." ;;
+    esac
 
-    read -p "Wings Port [8080]: " WINGS_PORT; WINGS_PORT=${WINGS_PORT:-8080}
-    read -p "SFTP Port [2022]: " SFTP_PORT; SFTP_PORT=${SFTP_PORT:-2022}
+    log "Detected architecture: $ARCH → Downloading $WINGS_FILE"
 
-    read -p "Node UUID: " UUID
-    read -p "Token ID: " TOKEN_ID
-    read -p "Token: " TOKEN
+    # Create required directories
+    mkdir -p /etc/pterodactyl /var/lib/pterodactyl/volumes /var/lib/pterodactyl/logs
+    chmod 755 /etc/pterodactyl /var/lib/pterodactyl
 
     apt install -y docker.io
     systemctl enable --now docker
@@ -232,10 +237,26 @@ install_wings() {
       -keyout /etc/certs/wings/privkey.pem \
       -out /etc/certs/wings/fullchain.pem
 
-    curl -L "https://github.com/pterodactyl/wings/releases/latest/download/wings_linux_$(uname -m)" -o /usr/local/bin/wings
+    curl -L "https://github.com/pterodactyl/wings/releases/latest/download/$WINGS_FILE" -o /usr/local/bin/wings
     chmod +x /usr/local/bin/wings
 
+    echo
+    echo "Enter your real values from Pterodactyl Panel → Nodes → your node"
+    echo
+
+    read -p "Panel URL (e.g. https://panel.gamerhost.qzz.io): " PANEL_URL
+    [[ ! $PANEL_URL =~ ^https:// ]] && err "Must start with https://"
+
+    read -p "Wings API Port [8080]: " WINGS_PORT; WINGS_PORT=${WINGS_PORT:-8080}
+    read -p "SFTP Port [2022]: " SFTP_PORT; SFTP_PORT=${SFTP_PORT:-2022}
+
+    read -p "Node UUID: " UUID
+    read -p "Token ID: " TOKEN_ID
+    read -p "Token: " TOKEN
+
     cat > /etc/pterodactyl/config.yml <<EOF
+debug: false
+
 uuid: "$UUID"
 token_id: $TOKEN_ID
 token: "$TOKEN"
@@ -253,7 +274,9 @@ system:
   sftp:
     bind_port: $SFTP_PORT
 
-remote: "$PANEL_URL"
+allowed_mounts: []
+
+remote: '$PANEL_URL'
 EOF
 
     cat > /etc/systemd/system/wings.service <<EOF
@@ -272,10 +295,44 @@ Restart=always
 WantedBy=multi-user.target
 EOF
 
-    systemctl daemon-reload
-    systemctl enable --now wings
+    # BFQ & cgroup v1 fix
+    log "Loading BFQ I/O scheduler..."
+    modprobe bfq || warn "BFQ module not available - skipping"
+
+    log "Applying cgroup v1 fix via GRUB (this will reboot the server)..."
+    echo "This will replace /etc/default/grub and reboot to enable cgroup v1."
+    read -p "Continue with GRUB replacement and reboot? (y/N): " confirm
+    if [[ $confirm =~ ^[Yy]$ ]]; then
+        log "Backing up current GRUB config..."
+        cp /etc/default/grub /etc/default/grub.bak 2>/dev/null || true
+
+        log "Writing new /etc/default/grub..."
+        cat > /etc/default/grub <<'EOF'
+# If you change this file, run 'update-grub' afterwards to update
+# /boot/grub/grub.cfg.
+# For full documentation of the options in this file, see:
+# info -f grub -n 'Simple configuration'
+GRUB_DEFAULT=0
+GRUB_TIMEOUT=5
+GRUB_DISTRIBUTOR=`lsb_release -i -s 2> /dev/null || echo Debian`
+GRUB_CMDLINE_LINUX_DEFAULT=""
+GRUB_CMDLINE_LINUX="console=tty0 console=ttyS0,115200 earlyprintk=ttyS0,115200 systemd.unified_cgroup_hierarchy=0"
+GRUB_TERMINAL="console serial"
+GRUB_SERIAL_COMMAND="serial --speed=115200"
+EOF
+
+        log "Updating GRUB..."
+        update-grub || err "update-grub failed!"
+
+        log "Rebooting server in 5 seconds to apply cgroup v1..."
+        sleep 5
+        reboot
+    else
+        warn "GRUB update skipped - cgroup fix not applied"
+    fi
 
     ok "Wings installed!"
+    echo "After reboot, check: systemctl status wings"
     read -p "Press Enter..." dummy
     menu
 }
@@ -361,7 +418,7 @@ panel_image_changer_menu() {
     [[ ! $confirm =~ ^[Yy]$ ]] && { echo "Aborted."; read -p "Press Enter..." dummy; menu; }
 
     log "Maintenance mode ON..."
-    php artisan down || warn "down failed - continuing anyway"
+    php artisan down || warn "down failed"
 
     echo "Choose replacement type:"
     echo "  1) All favicons (/public/favicons/) - 25+ files"
@@ -378,7 +435,7 @@ panel_image_changer_menu() {
     esac
 
     log "Maintenance mode OFF..."
-    php artisan up || warn "up failed - run manually: cd $PTERO_DIR && php artisan up"
+    php artisan up || warn "up failed - run manually"
 
     log "Fixing permissions + clearing caches + reload..."
     chown -R www-data:www-data "$PTERO_DIR/public"
@@ -390,7 +447,6 @@ panel_image_changer_menu() {
     ok "Image replacement complete!"
     echo
     echo "→ Open in **incognito** or press Ctrl + Shift + R"
-    echo "→ If still old images → wait 1-2 min or clear browser data"
     echo "→ Check files:"
     echo "  ls -la $PTERO_DIR/public/favicons/ | head -n 20"
     echo "  ls -la $PTERO_DIR/public/assets/svgs/"
@@ -451,7 +507,7 @@ replace_favicons() {
             "$FAV_DIR/favicon.ico" && ok "favicon.ico done"
 
     chown -R www-data:www-data "$FAV_DIR"
-    ok "Favicons complete!"
+    ok "All favicons replaced!"
 }
 
 replace_main_svgs() {
@@ -479,7 +535,7 @@ replace_main_svgs() {
     done
 
     chown -R www-data:www-data "$SVG_DIR"
-    ok "4 SVGs done!"
+    ok "4 SVGs replaced!"
 }
 
 replace_all_svgs() {
@@ -497,7 +553,7 @@ replace_all_svgs() {
         if rsvg-convert -f svg "$src" -o "$file" 2>/dev/null; then
             ok "SVG: $base"
         else
-            warn "PNG: $base"
+            warn "PNG fallback: $base"
             convert "$src" -resize 512x512 -strip -quality 95 "$file"
         fi
     done
@@ -505,7 +561,7 @@ replace_all_svgs() {
     [ $count -eq 0 ] && warn "No files found in $SVG_DIR"
 
     chown -R www-data:www-data "$SVG_DIR"
-    ok "All $count images done!"
+    ok "All $count images replaced!"
 }
 
 menu
