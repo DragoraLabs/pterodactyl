@@ -364,9 +364,9 @@ panel_image_changer_menu() {
     php artisan down || warn "down failed - continuing anyway"
 
     echo "Choose replacement type:"
-    echo "  1) All favicons (/public/favicons/) - 25+ files"
+    echo "  1) favicons (/public/favicons/) - 25+ files"
     echo "  2) 4 Main SVGs (server_installing, server_error, pterodactyl, not_found)"
-    echo "  3) ALL images in /public/assets/svgs/ (10+ files)"
+    echo "  3) images in /public/assets/svgs/ (10+ files)"
     echo
     read -p "Select [1-3]: " SUBCHOICE
 
@@ -431,7 +431,7 @@ replace_favicons_menu() {
     install_image_tools
 
     echo "Choose method:"
-    echo "  1) One image for ALL favicons"
+    echo "  1) One image for favicons"
     echo "  2) One by one (separate image for each file)"
     read -p "Select [1-2]: " method
 
