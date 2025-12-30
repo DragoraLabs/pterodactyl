@@ -1,5 +1,5 @@
 #!/bin/bash
-# COMPLETE Pterodactyl Installer + Fixed Panel Image Changer (one by one or all)
+# COMPLETE Pterodactyl Installer + Panel Image Changer (Fixed 100% with artisan down/up + chown/nginx/cache clear)
 # Debian 11 Bullseye - December 30, 2025
 set -euo pipefail
 IFS=$'\n\t'
@@ -10,7 +10,7 @@ ok()   { echo -e "${GREEN}[OK]${NC} $1"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 err()  { echo -e "${RED}[ERROR]${NC} $1" >&2; exit 1; }
 
-[[ $EUID -ne 0 ]] && err "Run as root (sudo)."
+[[ $EUID -ne 0 ]] && err "Run this script as root (sudo)."
 
 clear
 echo -e "${GREEN}Pterodactyl Complete Installer + Image Changer${NC}"
@@ -64,7 +64,7 @@ install_panel() {
     echo -e "${GREEN}→ Install Pterodactyl Panel (port 8080 + HTTPS + Queue Worker)${NC}\n"
 
     read -p "Panel FQDN (e.g. panel.example.com): " FQDN
-    [[ -z "$FQDN" ]] && err "FQDN required!"
+    [[ -z "$FQDN" ]] && err "FQDN is required!"
 
     read -p "Admin Email [admin@$FQDN]: " ADMIN_EMAIL
     ADMIN_EMAIL=${ADMIN_EMAIL:-"admin@$FQDN"}
@@ -348,15 +348,15 @@ install_cloudflare_tunnel() {
 
 panel_image_changer_menu() {
     clear
-    echo -e "${GREEN}Panel Image Changer (with artisan down/up)${NC}\n"
+    echo -e "${GREEN}Panel Image Changer (with artisan down/up + chown/cache/nginx)${NC}\n"
 
     if [ ! -d "$PTERO_DIR/public" ]; then
-        err "Panel not found at $PTERO_DIR. Install panel first (option 1)!"
+        err "Panel not found at $PTERO_DIR. Install panel first!"
     fi
 
-    cd "$PTERO_DIR" || err "Cannot cd to $PTERO_DIR"
+    cd "$PTERO_DIR" || err "Cannot cd"
 
-    echo "WARNING: Panel will be in maintenance mode (503) for ~30-90 seconds"
+    echo "WARNING: Panel will show 503 for ~30-90 seconds"
     read -p "Continue? (y/N): " confirm
     [[ ! $confirm =~ ^[Yy]$ ]] && { echo "Aborted."; read -p "Press Enter..." dummy; menu; }
 
@@ -364,46 +364,46 @@ panel_image_changer_menu() {
     php artisan down || warn "down failed - continuing anyway"
 
     echo "Choose replacement type:"
-    echo "  1) favicons (/public/favicons/) - 25+ files"
+    echo "  1) All favicons (/public/favicons/) - 25+ files"
     echo "  2) 4 Main SVGs (server_installing, server_error, pterodactyl, not_found)"
-    echo "  3) images in /public/assets/svgs/ (10+ files)"
+    echo "  3) ALL images in /public/assets/svgs/ (10+ files)"
     echo
     read -p "Select [1-3]: " SUBCHOICE
 
     case $SUBCHOICE in
-        1) replace_favicons_menu ;;
-        2) replace_main_svgs_menu ;;
-        3) replace_all_svgs_menu ;;
+        1) replace_favicons ;;
+        2) replace_main_svgs ;;
+        3) replace_all_svgs ;;
         *) panel_image_changer_menu ;;
     esac
 
     log "Maintenance mode OFF..."
-    php artisan up || warn "up failed - run manually"
+    php artisan up || warn "up failed - run manually: cd $PTERO_DIR && php artisan up"
 
-    log "Clearing caches..."
+    log "Fixing permissions + clearing caches + reload..."
+    chown -R www-data:www-data "$PTERO_DIR/public"
     php artisan cache:clear
     php artisan view:clear
     php artisan config:cache || true
-
-    log "Reloading Nginx..."
     systemctl reload nginx || warn "Nginx reload failed"
 
     ok "Image replacement complete!"
-    echo "→ Open in incognito or Ctrl + Shift + R to see changes"
+    echo
+    echo "→ Open in **incognito** or press Ctrl + Shift + R"
+    echo "→ If still old images → wait 1-2 min or clear browser data"
+    echo "→ Check files:"
+    echo "  ls -la $PTERO_DIR/public/favicons/ | head -n 20"
+    echo "  ls -la $PTERO_DIR/public/assets/svgs/"
     echo
     read -p "Press Enter..." dummy
     menu
 }
 
 get_source_image() {
-    local prompt="$1"
     local img=""
     while true; do
-        read -p "$prompt" img
-        if [[ -z "$img" ]]; then
-            warn "Cannot be empty. Try again."
-            continue
-        fi
+        read -p "Enter image (URL or path): " img
+        [[ -z "$img" ]] && { warn "Cannot be empty!"; continue; }
 
         if [[ $img =~ ^https?:// ]]; then
             log "Downloading..."
@@ -411,43 +411,16 @@ get_source_image() {
             img="/tmp/ptero-img"
         fi
 
-        if [ ! -f "$img" ]; then
-            warn "File not found! Try again."
-            continue
-        fi
-
-        echo "$img"
-        break
+        [ -f "$img" ] && break
+        warn "File not found!"
     done
+    echo "$img"
 }
 
-install_image_tools() {
-    apt update -qq && apt install -y imagemagick librsvg2-bin pngquant || err "Failed to install image tools"
-}
+replace_favicons() {
+    log "Replacing ALL Favicons..."
+    local src=$(get_source_image)
 
-replace_favicons_menu() {
-    clear
-    echo -e "${GREEN}Replace Favicons (25+ files)${NC}\n"
-    install_image_tools
-
-    echo "Choose method:"
-    echo "  1) One image for favicons"
-    echo "  2) One by one (separate image for each file)"
-    read -p "Select [1-2]: " method
-
-    if [ "$method" == "1" ]; then
-        SOURCE_IMG=$(get_source_image "Enter ONE image for all favicons: ")
-        replace_favicons_all "$SOURCE_IMG"
-    else
-        replace_favicons_one_by_one
-    fi
-
-    read -p "Press Enter to return..." dummy
-    panel_image_changer_menu
-}
-
-replace_favicons_all() {
-    local src="$1"
     FAV_DIR="$PTERO_DIR/public/favicons"
     mkdir -p "$FAV_DIR"
 
@@ -471,72 +444,20 @@ replace_favicons_all() {
     for f in "${!fav_map[@]}"; do
         s=${fav_map[$f]}
         convert "$src" -resize ${s}x${s}^ -gravity center -extent ${s}x${s} -strip \
-                -quality 90 "$FAV_DIR/$f" && ok "Created: $f (${s}x${s})"
+                -quality 90 "$FAV_DIR/$f" && ok "Created: $f"
     done
 
     convert "$src" -resize 256x256 -define icon:auto-resize=256,128,64,48,32,16 \
-            "$FAV_DIR/favicon.ico" && ok "favicon.ico (multi-size)"
+            "$FAV_DIR/favicon.ico" && ok "favicon.ico done"
 
     chown -R www-data:www-data "$FAV_DIR"
-    ok "All favicons replaced with one image!"
+    ok "Favicons complete!"
 }
 
-replace_favicons_one_by_one() {
-    FAV_DIR="$PTERO_DIR/public/favicons"
-    mkdir -p "$FAV_DIR"
+replace_main_svgs() {
+    log "Replacing 4 Main SVGs..."
+    local src=$(get_source_image)
 
-    declare -A fav_map=(
-        ["android-chrome-192x192.png"]="192" ["android-chrome-512x512.png"]="512"
-        ["android-icon-144x144.png"]="144" ["android-icon-192x192.png"]="192"
-        ["android-icon-36x36.png"]="36" ["android-icon-48x48.png"]="48"
-        ["android-icon-72x72.png"]="72" ["android-icon-96x96.png"]="96"
-        ["apple-icon-114x114.png"]="114" ["apple-icon-120x120.png"]="120"
-        ["apple-icon-144x144.png"]="144" ["apple-icon-152x152.png"]="152"
-        ["apple-icon-180x180.png"]="180" ["apple-icon-57x57.png"]="57"
-        ["apple-icon-60x60.png"]="60" ["apple-icon-72x72.png"]="72"
-        ["apple-icon-76x76.png"]="76" ["apple-icon-precomposed.png"]="180"
-        ["apple-icon.png"]="180" ["apple-touch-icon.png"]="180"
-        ["favicon-16x16.png"]="16" ["favicon-32x32.png"]="32" ["favicon-96x96.png"]="96"
-        ["ms-icon-144x144.png"]="144" ["ms-icon-150x150.png"]="150"
-        ["ms-icon-310x310.png"]="310" ["ms-icon-70x70.png"]="70"
-        ["mstile-150x150.png"]="150" ["safari-pinned-tab.svg"]="512"
-    )
-
-    for f in "${!fav_map[@]}"; do
-        echo "For file: $f"
-        SOURCE_IMG=$(get_source_image "Enter image for $f: ")
-        s=${fav_map[$f]}
-        convert "$SOURCE_IMG" -resize ${s}x${s}^ -gravity center -extent ${s}x${s} -strip \
-                -quality 90 "$FAV_DIR/$f" && ok "Updated: $f"
-    done
-
-    chown -R www-data:www-data "$FAV_DIR"
-    ok "Favicons replaced one by one!"
-}
-
-replace_main_svgs_menu() {
-    clear
-    echo -e "${GREEN}Replace 4 Main SVGs${NC}\n"
-    install_image_tools
-
-    echo "Choose method:"
-    echo "  1) One image for all 4 SVGs"
-    echo "  2) One by one (separate image for each)"
-    read -p "Select [1-2]: " method
-
-    if [ "$method" == "1" ]; then
-        SOURCE_IMG=$(get_source_image "Enter ONE image for all 4 SVGs: ")
-        replace_main_svgs_all "$SOURCE_IMG"
-    else
-        replace_main_svgs_one_by_one
-    fi
-
-    read -p "Press Enter..." dummy
-    panel_image_changer_menu
-}
-
-replace_main_svgs_all() {
-    local src="$1"
     SVG_DIR="$PTERO_DIR/public/assets/svgs"
     mkdir -p "$SVG_DIR"
 
@@ -550,7 +471,7 @@ replace_main_svgs_all() {
     for f in "${!svgs[@]}"; do
         target="$SVG_DIR/$f"
         if rsvg-convert -f svg "$src" -o "$target" 2>/dev/null; then
-            ok "Vector SVG: $f"
+            ok "SVG: $f"
         else
             warn "PNG fallback: $f"
             convert "$src" -resize 512x512 -strip -quality 95 "${target%.svg}.png"
@@ -558,59 +479,13 @@ replace_main_svgs_all() {
     done
 
     chown -R www-data:www-data "$SVG_DIR"
-    ok "4 main SVGs replaced with one image!"
+    ok "4 SVGs done!"
 }
 
-replace_main_svgs_one_by_one() {
-    SVG_DIR="$PTERO_DIR/public/assets/svgs"
-    mkdir -p "$SVG_DIR"
+replace_all_svgs() {
+    log "Replacing ALL in /assets/svgs/..."
+    local src=$(get_source_image)
 
-    declare -A svgs=(
-        ["server_installing.svg"]="Server installing"
-        ["server_error.svg"]="Server error"
-        ["pterodactyl.svg"]="Login logo"
-        ["not_found.svg"]="Not found"
-    )
-
-    for f in "${!svgs[@]}"; do
-        echo "For file: $f (${svgs[$f]})"
-        SOURCE_IMG=$(get_source_image "Enter image for $f: ")
-        target="$SVG_DIR/$f"
-        if rsvg-convert -f svg "$SOURCE_IMG" -o "$target" 2>/dev/null; then
-            ok "Vector SVG: $f"
-        else
-            warn "PNG fallback: $f"
-            convert "$SOURCE_IMG" -resize 512x512 -strip -quality 95 "${target%.svg}.png"
-        fi
-    done
-
-    chown -R www-data:www-data "$SVG_DIR"
-    ok "4 main SVGs replaced one by one!"
-}
-
-replace_all_svgs_menu() {
-    clear
-    echo -e "${GREEN}Replace ALL in /assets/svgs/${NC}\n"
-    install_image_tools
-
-    echo "Choose method:"
-    echo "  1) One image for ALL files"
-    echo "  2) One by one (separate image for each file)"
-    read -p "Select [1-2]: " method
-
-    if [ "$method" == "1" ]; then
-        SOURCE_IMG=$(get_source_image "Enter ONE image for all files: ")
-        replace_all_svgs_all "$SOURCE_IMG"
-    else
-        replace_all_svgs_one_by_one
-    fi
-
-    read -p "Press Enter..." dummy
-    panel_image_changer_menu
-}
-
-replace_all_svgs_all() {
-    local src="$1"
     SVG_DIR="$PTERO_DIR/public/assets/svgs"
     mkdir -p "$SVG_DIR"
 
@@ -620,9 +495,9 @@ replace_all_svgs_all() {
         ((count++))
         base=$(basename "$file")
         if rsvg-convert -f svg "$src" -o "$file" 2>/dev/null; then
-            ok "Vector SVG: $base"
+            ok "SVG: $base"
         else
-            warn "PNG fallback: $base"
+            warn "PNG: $base"
             convert "$src" -resize 512x512 -strip -quality 95 "$file"
         fi
     done
@@ -630,28 +505,7 @@ replace_all_svgs_all() {
     [ $count -eq 0 ] && warn "No files found in $SVG_DIR"
 
     chown -R www-data:www-data "$SVG_DIR"
-    ok "All $count images replaced with one image!"
-}
-
-replace_all_svgs_one_by_one() {
-    SVG_DIR="$PTERO_DIR/public/assets/svgs"
-    mkdir -p "$SVG_DIR"
-
-    for file in "$SVG_DIR"/*.{svg,png,jpg,jpeg}; do
-        [ -f "$file" ] || continue
-        base=$(basename "$file")
-        echo "For file: $base"
-        SOURCE_IMG=$(get_source_image "Enter image for $base: ")
-        if rsvg-convert -f svg "$SOURCE_IMG" -o "$file" 2>/dev/null; then
-            ok "Vector SVG: $base"
-        else
-            warn "PNG fallback: $base"
-            convert "$SOURCE_IMG" -resize 512x512 -strip -quality 95 "$file"
-        fi
-    done
-
-    chown -R www-data:www-data "$SVG_DIR"
-    ok "All images replaced one by one!"
+    ok "All $count images done!"
 }
 
 menu
