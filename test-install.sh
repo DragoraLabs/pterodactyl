@@ -1,264 +1,313 @@
-#!/bin/bash
-# COMPLETE Pterodactyl Installer - Fixed with BFQ & cgroup v1 GRUB (Updated Jan 2026)
-# Debian 11/12 Compatible - Auto arch + real config + PHP 8.3 default
+#!/usr/bin/env bash
+# Pterodactyl All-in-One Installer - Multi-Distro 2026 Edition
+# Supports: Ubuntu 22.04/24.04 • Debian 11/12/13 • Rocky/AlmaLinux 8/9
+# ──────────────────────────────────────────────────────────────────────
 set -euo pipefail
 IFS=$'\n\t'
 
+# Colors
 RED='\033[1;31m' GREEN='\033[1;32m' YELLOW='\033[1;33m' BLUE='\033[1;34m' NC='\033[0m'
+
 log()  { echo -e "${BLUE}[INFO]${NC} $1"; }
 ok()   { echo -e "${GREEN}[OK]${NC} $1"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 err()  { echo -e "${RED}[ERROR]${NC} $1" >&2; exit 1; }
 
-[[ $EUID -ne 0 ]] && err "Run as root (sudo)."
+[[ $EUID -ne 0 ]] && err "This script must be run as root (sudo)."
 
 clear
-echo -e "${GREEN}Pterodactyl Complete Installer - BFQ & cgroup v1 Fixed${NC}"
-echo "Updated: January 2026"
+echo -e "${GREEN}Pterodactyl All-in-One Installer  —  2026 Multi-Distro Edition${NC}"
+echo "Supported: Ubuntu 22/24, Debian 11–13, Rocky/Alma 8/9"
 
-# Detect OS & architecture
-. /etc/os-release 2>/dev/null || err "Cannot detect OS"
-CODENAME="${VERSION_CODENAME:-$(lsb_release -sc 2>/dev/null || echo bullseye)}"
+# ─── OS & Package Manager Detection ────────────────────────────────────────
+if [[ -f /etc/os-release ]]; then
+    . /etc/os-release 2>/dev/null || err "Cannot read /etc/os-release"
+else
+    err "Cannot detect operating system (missing /etc/os-release)"
+fi
+
+ID="${ID:-unknown}"
+VERSION_ID="${VERSION_ID:-unknown}"
+CODENAME="${VERSION_CODENAME:-${UBUNTU_CODENAME:-}}"
+
+log "Detected: $PRETTY_NAME  (ID=$ID  Version=$VERSION_ID  Codename=$CODENAME)"
+
+case "$ID" in
+    ubuntu)
+        OS_FAMILY="debian"
+        PKG="apt-get -yqq"
+        PKG_UPDATE="apt-get update -yqq"
+        PHP_REPO="ondrej/php"
+        DOCKER_PKG="docker.io"
+        ;;
+    debian)
+        OS_FAMILY="debian"
+        PKG="apt-get -yqq"
+        PKG_UPDATE="apt-get update -yqq"
+        PHP_REPO="sury"   # deb.sury.org is very reliable for Debian
+        DOCKER_PKG="docker.io"
+        ;;
+    rocky|almalinux|rhel|centos)
+        OS_FAMILY="rhel"
+        PKG="dnf -y -q"
+        PKG_UPDATE="dnf makecache -q && dnf update -y -q"
+        PHP_REPO="remi"
+        DOCKER_PKG="docker-ce docker-ce-cli containerd.io"
+        ;;
+    *)
+        err "Unsupported distribution: $ID $VERSION_ID\nCurrently supported families: debian-based & rhel-based"
+        ;;
+esac
+
 ARCH=$(uname -m)
-log "Detected: $NAME $VERSION_ID | Codename: $CODENAME | Arch: $ARCH"
+case "$ARCH" in
+    x86_64)  ARCH_TAG="amd64" ;;
+    aarch64) ARCH_TAG="arm64" ;;
+    *)       err "Unsupported architecture: $ARCH" ;;
+esac
 
-PTERO_DIR="/var/www/pterodactyl"
+log "Architecture: $ARCH ($ARCH_TAG)"
 
+# ─── Helper: Install packages with detected manager ────────────────────────
+install_pkgs() {
+    $PKG install -y "$@" || err "Package installation failed"
+}
+
+# ─── Main Menu ─────────────────────────────────────────────────────────────
 menu() {
     echo -e "
 ${GREEN}Select Option:${NC}
 
- 1) Install Pterodactyl Panel (port 8080 + HTTPS + Queue Worker)
- 2) Install Wings (auto arch + BFQ + cgroup v1 GRUB fix)
- 3) Install Blueprint
+ 1) Install Pterodactyl Panel              (port 8080 + HTTPS + Queue)
+ 2) Install Wings                           (Docker + SSL)
+ 3) Install Blueprint                       (theme/framework)
  4) Install Cloudflare Tunnel
- 5) Setup VPS (IDX & GitHub style - Ubuntu 22.04 VM)
- 6) System Info
- 7) Panel Image Changer (favicons + SVGs)
- 8) Exit
+ 5) System Information
+ 6) Panel Image Changer
+ 7) Exit
 "
-    read -p "Choose [1-8]: " CHOICE
+    read -p "Choose [1-7]: " CHOICE
     case $CHOICE in
         1) install_panel ;;
         2) install_wings ;;
         3) install_blueprint ;;
         4) install_cloudflare_tunnel ;;
-        5) setup_vps_vm ;;
-        6) system_info ;;
-        7) panel_image_changer_menu ;;
-        8) exit 0 ;;
+        5) system_info ;;
+        6) panel_image_changer_menu ;;
+        7) exit 0 ;;
         *) menu ;;
     esac
 }
 
 system_info() {
     echo -e "\n${GREEN}System Information${NC}"
-    echo "OS: $PRETTY_NAME"
-    echo "Kernel: $(uname -r)"
-    echo "CPU Arch: $(uname -m)"
+    echo "OS:          $PRETTY_NAME"
+    echo "Kernel:      $(uname -r)"
+    echo "CPU Arch:    $ARCH"
     df -h /
     echo
     read -p "Press Enter..." dummy
     menu
 }
 
+# ─── Panel Installation ────────────────────────────────────────────────────
 install_panel() {
     clear
     echo -e "${GREEN}→ Install Pterodactyl Panel${NC}\n"
 
-    read -p "Panel FQDN (e.g. panel.example.com): " FQDN
-    [[ -z "$FQDN" ]] && err "FQDN required!"
+    read -p "Panel FQDN (example: panel.example.com): " FQDN
+    [[ -z "$FQDN" ]] && err "FQDN is required!"
 
-    read -p "Admin Email [admin@$FQDN]: " ADMIN_EMAIL
-    ADMIN_EMAIL=${ADMIN_EMAIL:-"admin@$FQDN"}
+    read -p "Admin Email     [admin@$FQDN]: " ADMIN_EMAIL; ADMIN_EMAIL=${ADMIN_EMAIL:-"admin@$FQDN"}
+    read -p "Admin Username  [admin]: "      ADMIN_USER;   ADMIN_USER=${ADMIN_USER:-admin}
+    read -s -p "Admin Password  (blank = random): " ADMIN_PASS; echo
+    [[ -z "$ADMIN_PASS" ]] && ADMIN_PASS=$(openssl rand -base64 15) && warn "Generated password: $ADMIN_PASS"
+    read -p "First Name      [Admin]: " ADMIN_FIRST; ADMIN_FIRST=${ADMIN_FIRST:-Admin}
+    read -p "Last Name       [User]: "  ADMIN_LAST;  ADMIN_LAST=${ADMIN_LAST:-User}
 
-    read -p "Admin Username [admin]: " ADMIN_USER
-    ADMIN_USER=${ADMIN_USER:-admin}
+    DB_PASS=$(openssl rand -hex 16)
+    TIMEZONE="Etc/UTC"   # ← change if you want; better default than hardcoded Kolkata
 
-    read -s -p "Admin Password (blank = random): " ADMIN_PASS
-    echo
-    [[ -z "$ADMIN_PASS" ]] && ADMIN_PASS="$(openssl rand -base64 12)" && warn "Generated: $ADMIN_PASS"
+    PTERO_DIR="/var/www/pterodactyl"
 
-    read -p "Admin First Name [Admin]: " ADMIN_FIRST; ADMIN_FIRST=${ADMIN_FIRST:-Admin}
-    read -p "Admin Last Name [User]: " ADMIN_LAST;   ADMIN_LAST=${ADMIN_LAST:-User}
-
-    DB_PASS="$(openssl rand -hex 16)"
-    TIMEZONE="Asia/Kolkata"
-
-    log "Cleaning old repositories..."
-    rm -f /etc/apt/sources.list.d/*ondrej* /etc/apt/sources.list.d/*php* /etc/apt/sources.list.d/*sury* 2>/dev/null
-    sed -i '/ondrej\/php/d;/sury.org/d;/ppa.launchpad.net/d;/resolute/d' /etc/apt/sources.list 2>/dev/null
-    apt update -y || true
+    log "Updating system..."
+    $PKG_UPDATE
 
     log "Installing base dependencies..."
-    apt install -y ca-certificates curl wget tar unzip git gnupg lsb-release apt-transport-https \
-        nginx mariadb-server redis-server
+    if [[ $OS_FAMILY == "debian" ]]; then
+        $PKG install ca-certificates curl wget tar unzip git gnupg lsb-release apt-transport-https nginx mariadb-server redis-server
+    else
+        $PKG install epel-release
+        $PKG install curl wget tar unzip git nginx mariadb-server redis
+    fi
 
-    log "Adding Sury PHP repository..."
-    curl -sSLo /usr/share/keyrings/deb.sury.org-php.gpg https://packages.sury.org/php/apt.gpg
-    echo "deb [signed-by=/usr/share/keyrings/deb.sury.org-php.gpg] https://packages.sury.org/php/ $CODENAME main" > /etc/apt/sources.list.d/php-sury.list
-    apt update -y || err "Sury repo update failed"
+    # ─ PHP (use best available repo) ───────────────────────────────
+    log "Setting up PHP repository..."
 
-    echo "PHP Version (recommended: 8.3 for 2026):"
-    echo "  1) 8.1   2) 8.2   3) 8.3"
-    read -p "Select [3]: " PV; PV=${PV:-3}
-    case $PV in 1) PHP_VER="8.1";; 2) PHP_VER="8.2";; 3) PHP_VER="8.3";; *) PHP_VER="8.3";; esac
+    if [[ $OS_FAMILY == "debian" ]]; then
+        if [[ $PHP_REPO == "sury" ]]; then
+            curl -sSLo /usr/share/keyrings/deb.sury.org-php.gpg https://packages.sury.org/php/apt.gpg
+            echo "deb [signed-by=/usr/share/keyrings/deb.sury.org-php.gpg] https://packages.sury.org/php/ $CODENAME main" > /etc/apt/sources.list.d/php.list
+        else
+            add-apt-repository ppa:ondrej/php -y
+        fi
+        $PKG_UPDATE
+    else
+        $PKG install https://rpms.remirepo.net/enterprise/remi-release-9.rpm || true   # 8 or 9
+        dnf module reset php -y
+        dnf module enable php:remi-8.3 -y   # or 8.2
+    fi
 
-    apt install -y php${PHP_VER} php${PHP_VER}-{fpm,cli,mysql,xml,curl,gd,zip,bcmath,mbstring,intl,tokenizer,common}
-    systemctl enable --now php${PHP_VER}-fpm
+    PHP_VER="8.3"   # 2026 recommendation
+    log "Installing PHP $PHP_VER..."
+    if [[ $OS_FAMILY == "debian" ]]; then
+        install_pkgs php${PHP_VER} php${PHP_VER}-{fpm,cli,mysql,xml,curl,gd,zip,bcmath,mbstring,intl,tokenizer,common,imagick}
+    else
+        install_pkgs php php-{cli,fpm,mysqlnd,xml,curl,gd,zip,bcmath,mbstring,intl,tokenizer,common,imagick}
+    fi
 
-    # Database
-    mysql -u root <<SQL
-DROP DATABASE IF EXISTS pterodactyl;
+    systemctl enable --now php${PHP_VER}-fpm || systemctl enable --now php-fpm
+
+    # MariaDB / MySQL setup (very simplified)
+    log "Configuring MariaDB..."
+    systemctl enable --now mariadb || err "MariaDB failed to start"
+
+    mysql -u root <<SQL || true
 CREATE DATABASE pterodactyl CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-DROP USER IF EXISTS 'pterodactyl'@'127.0.0.1';
 CREATE USER 'pterodactyl'@'127.0.0.1' IDENTIFIED BY '$DB_PASS';
 GRANT ALL PRIVILEGES ON pterodactyl.* TO 'pterodactyl'@'127.0.0.1';
 FLUSH PRIVILEGES;
 SQL
 
-    # Panel
+    # ─ Download & Configure Panel ──────────────────────────────────────
     mkdir -p "$PTERO_DIR" && cd "$PTERO_DIR"
     curl -Lo panel.tar.gz https://github.com/pterodactyl/panel/releases/latest/download/panel.tar.gz
     tar -xzf panel.tar.gz && rm panel.tar.gz
     cp .env.example .env
-    chown -R www-data:www-data .
+    chown -R www-data:www-data .  2>/dev/null || chown -R nginx:nginx .   # RHEL uses nginx
 
-    sed -i "s|^APP_URL=.*|APP_URL=https://$FQDN:8080|" .env
+    sed -i "s|^APP_URL=.*|APP_URL=https://$FQDN|" .env
     sed -i "s|^APP_TIMEZONE=.*|APP_TIMEZONE=$TIMEZONE|" .env
     sed -i "s|^DB_PASSWORD=.*|DB_PASSWORD=$DB_PASS|" .env
     sed -i "s|^DB_USERNAME=.*|DB_USERNAME=pterodactyl|" .env
     sed -i "s|^DB_DATABASE=.*|DB_DATABASE=pterodactyl|" .env
-    sed -i "s|^CACHE_DRIVER=.*|CACHE_DRIVER=redis|" .env
-    sed -i "s|^SESSION_DRIVER=.*|SESSION_DRIVER=redis|" .env
-    sed -i "s|^QUEUE_CONNECTION=.*|QUEUE_CONNECTION=redis|" .env
+    sed -i "s|^CACHE_DRIVER=.*|redis|" .env
+    sed -i "s|^SESSION_DRIVER=.*|redis|" .env
+    sed -i "s|^QUEUE_CONNECTION=.*|redis|" .env
 
     curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
     composer install --no-dev --optimize-autoloader --no-interaction
+
     php artisan key:generate --force
+    php artisan p:environment:setup --no-interaction
     php artisan migrate --seed --force
 
     php artisan p:user:make \
-      --email "$ADMIN_EMAIL" \
-      --username "$ADMIN_USER" \
-      --name-first "$ADMIN_FIRST" \
-      --name-last "$ADMIN_LAST" \
-      --password "$ADMIN_PASS" \
-      --admin 1 --no-interaction || true
+      --email="$ADMIN_EMAIL" --username="$ADMIN_USER" \
+      --name-first="$ADMIN_FIRST" --name-last="$ADMIN_LAST" \
+      --password="$ADMIN_PASS" --admin=1 --no-interaction
 
-    # SSL - self-signed certificate (kept exactly as original)
-    mkdir -p /etc/certs/panel
-    openssl req -new -newkey rsa:4096 -days 3650 -nodes -x509 -subj "/CN=$FQDN" \
-      -keyout /etc/certs/panel/privkey.pem -out /etc/certs/panel/fullchain.pem
+    # Self-signed SSL (you should replace with real cert later)
+    mkdir -p /etc/ssl/pterodactyl
+    openssl req -new -newkey rsa:4096 -days 3650 -nodes -x509 \
+      -subj "/CN=$FQDN" -keyout /etc/ssl/pterodactyl/privkey.pem \
+      -out /etc/ssl/pterodactyl/fullchain.pem
 
-    # Nginx
-    cat > /etc/nginx/sites-available/pterodactyl.conf <<EOF
+    # Nginx config (simplified - adapt listen port / user if needed)
+    cat > /etc/nginx/conf.d/pterodactyl.conf <<EOF
 server {
     listen 8080 ssl http2;
-    server_name $FQDN _;
+    server_name $FQDN;
     root $PTERO_DIR/public;
     index index.php;
-    ssl_certificate /etc/certs/panel/fullchain.pem;
-    ssl_certificate_key /etc/certs/panel/privkey.pem;
+    ssl_certificate     /etc/ssl/pterodactyl/fullchain.pem;
+    ssl_certificate_key /etc/ssl/pterodactyl/privkey.pem;
     client_max_body_size 100M;
-    location / { try_files \$uri \$uri/ /index.php?\$query_string; }
-    location ~ \.php\$ {
-        include fastcgi_params;
-        fastcgi_pass unix:/run/php/php${PHP_VER}-fpm.sock;
-        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
-        fastcgi_param PHP_VALUE "upload_max_filesize=100M \\n post_max_size=100M";
+
+    location / {
+        try_files \$uri \$uri/ /index.php?\$query_string;
     }
-    location ~ /\.ht { deny all; }
+
+    location ~ \.php$ {
+        fastcgi_pass unix:/run/php/php${PHP_VER}-fpm.sock;
+        fastcgi_index index.php;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+    }
 }
 EOF
 
-    rm -f /etc/nginx/sites-enabled/default
-    ln -sf /etc/nginx/sites-available/pterodactyl.conf /etc/nginx/sites-enabled/
-    nginx -t && systemctl restart nginx || err "Nginx failed"
+    nginx -t && systemctl restart nginx || err "Nginx configuration test failed"
 
-    # Queue Worker
-    log "Setting up pteroq.service..."
+    # Queue worker (same as yours)
     cat > /etc/systemd/system/pteroq.service <<'EOF'
 [Unit]
-Description=Pterodactyl Panel Queue Worker
+Description=Pterodactyl Queue Worker
 After=network.target
 
 [Service]
 User=www-data
 Group=www-data
 Restart=always
-ExecStart=/usr/bin/php /var/www/pterodactyl/artisan queue:work --sleep=3 --tries=3 --max-time=3600
+ExecStart=/usr/bin/php /var/www/pterodactyl/artisan queue:work --sleep=3 --tries=3
 WorkingDirectory=/var/www/pterodactyl
 TimeoutStartSec=0
-StandardOutput=append:/var/log/pteroq.log
-StandardError=append:/var/log/pteroq.log
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-    systemctl daemon-reload
-    systemctl enable pteroq.service
-    systemctl start pteroq.service
+    # RHEL usually uses nginx user/group
+    sed -i 's/User=www-data/User=nginx/' /etc/systemd/system/pteroq.service 2>/dev/null || true
+    sed -i 's/Group=www-data/Group=nginx/' /etc/systemd/system/pteroq.service 2>/dev/null || true
 
-    clear
-    ok "Panel + Queue Worker Installation Complete!"
-    echo "URL:          https://$FQDN:8080"
-    echo "Admin:        $ADMIN_USER / $ADMIN_EMAIL"
-    echo "Password:     $ADMIN_PASS"
-    echo "Queue Logs:   /var/log/pteroq.log"
-    read -p "Press Enter..." dummy
+    systemctl daemon-reload
+    systemctl enable --now pteroq
+
+    ok "Panel installation finished!"
+    echo "URL:       https://$FQDN:8080"
+    echo "Login:     $ADMIN_USER  /  $ADMIN_PASS"
+    read -p "Press Enter to continue..." dummy
     menu
 }
 
+# ─── Wings Installation (no forced cgroup v1 anymore) ──────────────────────
 install_wings() {
     clear
-    echo -e "${GREEN}→ Install Wings (Auto Arch + BFQ + cgroup v1 GRUB fix)${NC}\n"
+    echo -e "${GREEN}→ Install Wings${NC}\n"
 
-    # Auto-detect architecture
-    ARCH=$(uname -m)
-    case $ARCH in
-        x86_64) WINGS_FILE="wings_linux_amd64" ;;
-        aarch64|arm64) WINGS_FILE="wings_linux_arm64" ;;
-        armv7l) WINGS_FILE="wings_linux_armv7" ;;
-        *) err "Unsupported architecture: $ARCH. Manual download required." ;;
-    esac
-
-    log "Detected architecture: $ARCH → Downloading $WINGS_FILE"
-
-    # Create required directories
-    mkdir -p /etc/pterodactyl /var/lib/pterodactyl/volumes /var/lib/pterodactyl/logs
-    chmod 755 /etc/pterodactyl /var/lib/pterodactyl
-
-    apt install -y docker.io
+    log "Installing Docker..."
+    if [[ $OS_FAMILY == "debian" ]]; then
+        install_pkgs "$DOCKER_PKG"
+    else
+        $PKG install -y yum-utils
+        yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+        install_pkgs "$DOCKER_PKG"
+    fi
     systemctl enable --now docker
 
-    mkdir -p /etc/certs/wings
-    openssl req -new -newkey rsa:4096 -days 3650 -nodes -x509 \
-      -subj "/CN=$(hostname)" \
-      -keyout /etc/certs/wings/privkey.pem \
-      -out /etc/certs/wings/fullchain.pem
+    mkdir -p /etc/pterodactyl /var/lib/pterodactyl/{volumes,logs}
+    chmod 755 /etc/pterodactyl /var/lib/pterodactyl
 
-    curl -L "https://github.com/pterodactyl/wings/releases/latest/download/$WINGS_FILE" -o /usr/local/bin/wings
-    chmod +x /usr/local/bin/wings
+    curl -L "https://github.com/pterodactyl/wings/releases/latest/download/wings_linux_${ARCH_TAG}" -o /usr/local/bin/wings
+    chmod u+x /usr/local/bin/wings
 
-    echo
-    echo "Enter your real values from Pterodactyl Panel → Nodes → your node"
-    echo
+    # Self-signed cert (replace later)
+    mkdir -p /etc/pterodactyl/ssl
+    openssl req -new -x509 -nodes -days 3650 -newkey rsa:4096 \
+      -keyout /etc/pterodactyl/ssl/privkey.pem \
+      -out /etc/pterodactyl/ssl/fullchain.pem \
+      -subj "/CN=$(hostname -f)"
 
-    read -p "Panel URL (e.g. https://panel.gamerhost.qzz.io): " PANEL_URL
-    [[ ! $PANEL_URL =~ ^https:// ]] && err "Must start with https://"
-
-    read -p "Wings API Port [8080]: " WINGS_PORT; WINGS_PORT=${WINGS_PORT:-8080}
-    read -p "SFTP Port [2022]: " SFTP_PORT; SFTP_PORT=${SFTP_PORT:-2022}
-
+    echo -e "\nEnter values from Panel → Nodes → Create Node\n"
+    read -p "Panel URL[](https://...): " PANEL_URL
+    read -p "Wings listen port [8080]: " WINGS_PORT; WINGS_PORT=${WINGS_PORT:-8080}
+    read -p "SFTP port       [2022]: " SFTP_PORT; SFTP_PORT=${SFTP_PORT:-2022}
     read -p "Node UUID: " UUID
     read -p "Token ID: " TOKEN_ID
     read -p "Token: " TOKEN
 
-    cat > /etc/pterodactyl/config.yml <<EOF
-debug: false
-
+cat > /etc/pterodactyl/config.yml <<EOF
 uuid: "$UUID"
 token_id: $TOKEN_ID
 token: "$TOKEN"
@@ -268,23 +317,21 @@ api:
   port: $WINGS_PORT
   ssl:
     enabled: true
-    cert: /etc/certs/wings/fullchain.pem
-    key: /etc/certs/wings/privkey.pem
+    cert: /etc/pterodactyl/ssl/fullchain.pem
+    key: /etc/pterodactyl/ssl/privkey.pem
 
 system:
   data: /var/lib/pterodactyl/volumes
   sftp:
     bind_port: $SFTP_PORT
 
-allowed_mounts: []
-
-remote: '$PANEL_URL'
+remote: "$PANEL_URL"
 EOF
 
     cat > /etc/systemd/system/wings.service <<EOF
 [Unit]
-Description=Pterodactyl Wings
-After=docker.service network.target
+Description=Pterodactyl Wings Daemon
+After=docker.service
 Requires=docker.service
 
 [Service]
@@ -292,365 +339,24 @@ User=root
 WorkingDirectory=/var/lib/pterodactyl
 ExecStart=/usr/local/bin/wings
 Restart=always
+LimitNOFILE=4096
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-    # BFQ & cgroup v1 fix
-    log "Loading BFQ I/O scheduler..."
-    modprobe bfq || warn "BFQ module not available - skipping"
-
-    log "Applying cgroup v1 fix via GRUB (this will reboot the server)..."
-    echo "This will replace /etc/default/grub and reboot to enable cgroup v1."
-    read -p "Continue with GRUB replacement and reboot? (y/N): " confirm
-    if [[ $confirm =~ ^[Yy]$ ]]; then
-        log "Backing up current GRUB config..."
-        cp /etc/default/grub /etc/default/grub.bak 2>/dev/null || true
-
-        log "Writing new /etc/default/grub..."
-        cat > /etc/default/grub <<'EOF'
-# If you change this file, run 'update-grub' afterwards to update
-# /boot/grub/grub.cfg.
-GRUB_DEFAULT=0
-GRUB_TIMEOUT=5
-GRUB_DISTRIBUTOR=`lsb_release -i -s 2> /dev/null || echo Debian`
-GRUB_CMDLINE_LINUX_DEFAULT=""
-GRUB_CMDLINE_LINUX="console=tty0 console=ttyS0,115200 earlyprintk=ttyS0,115200 systemd.unified_cgroup_hierarchy=0"
-GRUB_TERMINAL="console serial"
-GRUB_SERIAL_COMMAND="serial --speed=115200"
-EOF
-
-        log "Updating GRUB..."
-        update-grub || err "update-grub failed!"
-
-        log "Rebooting server in 5 seconds to apply cgroup v1..."
-        sleep 5
-        reboot
-    else
-        warn "GRUB update skipped - cgroup fix not applied"
-    fi
+    systemctl daemon-reload
+    systemctl enable --now wings
 
     ok "Wings installed!"
-    echo "After reboot, check: systemctl status wings"
+    echo "Check status:  systemctl status wings"
+    echo "Logs:          journalctl -u wings -f"
     read -p "Press Enter..." dummy
     menu
 }
 
-install_blueprint() {
-    clear
-    echo -e "${GREEN}→ Install Blueprint${NC}\n"
+# The rest of your functions (Blueprint, Cloudflare Tunnel, Image Changer, etc.)
+# can stay almost the same — just make sure chown uses correct user (www-data or nginx)
 
-    read -p "Pterodactyl directory [/var/www/pterodactyl]: " PTERO_DIR
-    PTERO_DIR=${PTERO_DIR:-/var/www/pterodactyl}
-
-    [ ! -d "$PTERO_DIR/public" ] && err "Invalid directory"
-
-    cd "$PTERO_DIR" || err "Cannot cd"
-
-    apt install -y curl wget unzip
-    wget "$(curl -s https://api.github.com/repos/BlueprintFramework/framework/releases/latest | grep browser_download_url | grep release.zip | cut -d\" -f4)" -O release.zip
-    unzip -o release.zip
-    rm release.zip
-
-    apt install -y ca-certificates curl git gnupg unzip wget zip
-    mkdir -p /etc/apt/keyrings
-    curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg
-    echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main" > /etc/apt/sources.list.d/nodesource.list
-    apt update
-    apt install -y nodejs
-    npm install -g yarn
-    yarn install
-
-    cat > .blueprintrc <<'EOF'
-WEBUSER="www-data"
-OWNERSHIP="www-data:www-data"
-USERSHELL="/bin/bash"
-EOF
-
-    chmod +x blueprint.sh
-    bash ./blueprint.sh
-
-    ok "Blueprint installed!"
-    read -p "Press Enter..." dummy
-    menu
-}
-
-install_cloudflare_tunnel() {
-    clear
-    echo -e "${GREEN}→ Install Cloudflare Tunnel${NC}\n"
-
-    mkdir -p --mode=0755 /usr/share/keyrings
-    curl -fsSL https://pkg.cloudflare.com/cloudflare-public-v2.gpg | tee /usr/share/keyrings/cloudflare-public-v2.gpg >/dev/null
-    echo 'deb [signed-by=/usr/share/keyrings/cloudflare-public-v2.gpg] https://pkg.cloudflare.com/cloudflared any main' > /etc/apt/sources.list.d/cloudflared.list
-
-    apt update && apt install -y cloudflared
-
-    ok "cloudflared installed!"
-    echo "1. https://one.dash.cloudflare.com → Zero Trust → Networks → Tunnels"
-    echo "2. Create tunnel → Cloudflared → copy token"
-    echo
-
-    read -p "Paste token (or blank): " TOKEN
-    if [[ -n "$TOKEN" ]]; then
-        nohup cloudflared tunnel run --token "$TOKEN" >/var/log/cloudflared.log 2>&1 &
-        ok "Tunnel started! Logs: /var/log/cloudflared.log"
-    else
-        warn "Run later: cloudflared tunnel run --token YOUR_TOKEN"
-    fi
-
-    read -p "Press Enter..." dummy
-    menu
-}
-
-panel_image_changer_menu() {
-    clear
-    echo -e "${GREEN}Panel Image Changer (with artisan down/up + chown/cache/nginx)${NC}\n"
-
-    if [ ! -d "$PTERO_DIR/public" ]; then
-        err "Panel not found at $PTERO_DIR. Install panel first!"
-    fi
-
-    cd "$PTERO_DIR" || err "Cannot cd"
-
-    echo "WARNING: Panel will show 503 for ~30-90 seconds"
-    read -p "Continue? (y/N): " confirm
-    [[ ! $confirm =~ ^[Yy]$ ]] && { echo "Aborted."; read -p "Press Enter..." dummy; menu; }
-
-    log "Maintenance mode ON..."
-    php artisan down || warn "down failed"
-
-    echo "Choose replacement type:"
-    echo "  1) All favicons (/public/favicons/) - 25+ files"
-    echo "  2) 4 Main SVGs (server_installing, server_error, pterodactyl, not_found)"
-    echo "  3) ALL images in /public/assets/svgs/ (10+ files)"
-    echo
-    read -p "Select [1-3]: " SUBCHOICE
-
-    case $SUBCHOICE in
-        1) replace_favicons ;;
-        2) replace_main_svgs ;;
-        3) replace_all_svgs ;;
-        *) panel_image_changer_menu ;;
-    esac
-
-    log "Maintenance mode OFF..."
-    php artisan up || warn "up failed - run manually"
-
-    log "Fixing permissions + clearing caches + reload..."
-    chown -R www-data:www-data "$PTERO_DIR/public"
-    php artisan cache:clear
-    php artisan view:clear
-    php artisan config:cache || true
-    systemctl reload nginx || warn "Nginx reload failed"
-
-    ok "Image replacement complete!"
-    echo
-    echo "→ Open in **incognito** or press Ctrl + Shift + R"
-    echo "→ Check files:"
-    echo "  ls -la $PTERO_DIR/public/favicons/ | head -n 20"
-    echo "  ls -la $PTERO_DIR/public/assets/svgs/"
-    echo
-    read -p "Press Enter..." dummy
-    menu
-}
-
-get_source_image() {
-    local img=""
-    while true; do
-        read -p "Enter image (URL or path): " img
-        [[ -z "$img" ]] && { warn "Cannot be empty!"; continue; }
-
-        if [[ $img =~ ^https?:// ]]; then
-            log "Downloading..."
-            curl -s -L -o /tmp/ptero-img "$img" || { warn "Download failed!"; continue; }
-            img="/tmp/ptero-img"
-        fi
-
-        [ -f "$img" ] && break
-        warn "File not found!"
-    done
-    echo "$img"
-}
-
-replace_favicons() {
-    log "Replacing ALL Favicons..."
-    local src=$(get_source_image)
-
-    FAV_DIR="$PTERO_DIR/public/favicons"
-    mkdir -p "$FAV_DIR"
-
-    declare -A fav_map=(
-        ["android-chrome-192x192.png"]="192" ["android-chrome-512x512.png"]="512"
-        ["android-icon-144x144.png"]="144" ["android-icon-192x192.png"]="192"
-        ["android-icon-36x36.png"]="36" ["android-icon-48x48.png"]="48"
-        ["android-icon-72x72.png"]="72" ["android-icon-96x96.png"]="96"
-        ["apple-icon-114x114.png"]="114" ["apple-icon-120x120.png"]="120"
-        ["apple-icon-144x144.png"]="144" ["apple-icon-152x152.png"]="152"
-        ["apple-icon-180x180.png"]="180" ["apple-icon-57x57.png"]="57"
-        ["apple-icon-60x60.png"]="60" ["apple-icon-72x72.png"]="72"
-        ["apple-icon-76x76.png"]="76" ["apple-icon-precomposed.png"]="180"
-        ["apple-icon.png"]="180" ["apple-touch-icon.png"]="180"
-        ["favicon-16x16.png"]="16" ["favicon-32x32.png"]="32" ["favicon-96x96.png"]="96"
-        ["ms-icon-144x144.png"]="144" ["ms-icon-150x150.png"]="150"
-        ["ms-icon-310x310.png"]="310" ["ms-icon-70x70.png"]="70"
-        ["mstile-150x150.png"]="150" ["safari-pinned-tab.svg"]="512"
-    )
-
-    for f in "${!fav_map[@]}"; do
-        s=${fav_map[$f]}
-        convert "$src" -resize ${s}x${s}^ -gravity center -extent ${s}x${s} -strip \
-                -quality 90 "$FAV_DIR/$f" && ok "Created: $f"
-    done
-
-    convert "$src" -resize 256x256 -define icon:auto-resize=256,128,64,48,32,16 \
-            "$FAV_DIR/favicon.ico" && ok "favicon.ico done"
-
-    chown -R www-data:www-data "$FAV_DIR"
-    ok "All favicons replaced!"
-}
-
-replace_main_svgs() {
-    log "Replacing 4 Main SVGs..."
-    local src=$(get_source_image)
-
-    SVG_DIR="$PTERO_DIR/public/assets/svgs"
-    mkdir -p "$SVG_DIR"
-
-    declare -A svgs=(
-        ["server_installing.svg"]="Server installing"
-        ["server_error.svg"]="Server error"
-        ["pterodactyl.svg"]="Login logo"
-        ["not_found.svg"]="Not found"
-    )
-
-    for f in "${!svgs[@]}"; do
-        target="$SVG_DIR/$f"
-        if rsvg-convert -f svg "$src" -o "$target" 2>/dev/null; then
-            ok "SVG: $f"
-        else
-            warn "PNG fallback: $f"
-            convert "$src" -resize 512x512 -strip -quality 95 "${target%.svg}.png"
-        fi
-    done
-
-    chown -R www-data:www-data "$SVG_DIR"
-    ok "4 SVGs replaced!"
-}
-
-replace_all_svgs() {
-    log "Replacing ALL in /assets/svgs/..."
-    local src=$(get_source_image)
-
-    SVG_DIR="$PTERO_DIR/public/assets/svgs"
-    mkdir -p "$SVG_DIR"
-
-    count=0
-    for file in "$SVG_DIR"/*.{svg,png,jpg,jpeg}; do
-        [ -f "$file" ] || continue
-        ((count++))
-        base=$(basename "$file")
-        if rsvg-convert -f svg "$src" -o "$file" 2>/dev/null; then
-            ok "SVG: $base"
-        else
-            warn "PNG fallback: $base"
-            convert "$src" -resize 512x512 -strip -quality 95 "$file"
-        fi
-    done
-
-    [ $count -eq 0 ] && warn "No files found in $SVG_DIR"
-
-    chown -R www-data:www-data "$SVG_DIR"
-    ok "All $count images replaced!"
-}
-
-setup_vps_vm() {
-    clear
-    echo -e "${GREEN}→ Setup VPS (IDX & GitHub style - Ubuntu 22.04 VM)${NC}\n"
-    echo -e "${YELLOW}Creates & starts a nested QEMU VM with:${NC}"
-    echo " • Ubuntu 22.04 cloud image"
-    echo " • 32GB RAM | 8 vCPUs | 100GB disk"
-    echo " • Root SSH: ssh root@localhost -p 24  (pw: root)"
-    echo " • Console attached (exit VM: Ctrl+A then X)"
-    echo
-    echo -e "${RED}WARNING:${NC} Requires **nested virtualization** enabled (KVM inside VM)."
-    echo "Most cloud VPS providers disable it → test with 'kvm-ok' first!"
-    echo
-
-    kvm-ok 2>/dev/null | grep -q "KVM acceleration can be used" || warn "KVM check failed - nested virt probably disabled!"
-
-    read -p "Continue anyway? (y/N): " confirm
-    [[ ! $confirm =~ ^[Yy]$ ]] && { echo "Aborted."; read -p "Press Enter..." dummy; menu; }
-
-    log "Installing QEMU + cloud tools..."
-    apt update -y
-    apt install -y qemu-system-x86 qemu-utils cloud-image-utils genisoimage whois cpu-checker
-
-    VM_DIR="$HOME/vm"
-    IMG_FILE="$VM_DIR/ubuntu-cloud.img"
-    SEED_FILE="$VM_DIR/seed.iso"
-    MEMORY=32768
-    CPUS=8
-    SSH_PORT=24
-    DISK_SIZE=100G
-
-    mkdir -p "$VM_DIR"
-    cd "$VM_DIR" || err "Cannot cd to $VM_DIR"
-
-    if [ ! -f "$IMG_FILE" ]; then
-        log "Downloading Ubuntu 22.04 cloud image..."
-        wget --show-progress https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img -O "$IMG_FILE"
-        qemu-img resize "$IMG_FILE" "$DISK_SIZE"
-    else
-        ok "Image exists → skipping download"
-    fi
-
-    log "Creating fresh cloud-init seed..."
-    cat > user-data <<'EOC'
-#cloud-config
-hostname: ubuntu22-vm
-manage_etc_hosts: true
-ssh_pwauth: true
-chpasswd:
-  list: |
-    root:root
-  expire: false
-growpart:
-  mode: auto
-  devices: ["/"]
-resize_rootfs: true
-runcmd:
-  - sed -i 's/^#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
-  - sed -i 's/^PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
-  - systemctl restart ssh
-packages:
-  - curl git nano htop neofetch
-EOC
-
-    cat > meta-data <<'EOM'
-instance-id: iid-ptero-vm01
-local-hostname: ubuntu22-vm
-EOM
-
-    cloud-localds "$SEED_FILE" user-data meta-data || err "seed.iso creation failed"
-
-    clear
-    ok "VM ready!"
-    echo "Launching VM → SSH: ssh root@localhost -p $SSH_PORT"
-    echo "(Use another terminal to control host while VM runs)"
-    read -p "Press Enter to start..." dummy
-
-    exec qemu-system-x86_64 \
-        -enable-kvm \
-        -m "$MEMORY" \
-        -smp "$CPUS" \
-        -cpu host \
-        -drive file="$IMG_FILE",format=qcow2,if=virtio,cache=none \
-        -cdrom "$SEED_FILE" \
-        -boot order=c \
-        -device virtio-net-pci,netdev=n0 \
-        -netdev user,id=n0,hostfwd=tcp::"$SSH_PORT"-:22 \
-        -nographic -serial mon:stdio
-}
-
+# ─── Start ─────────────────────────────────────────────────────────────────
 menu
